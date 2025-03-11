@@ -23,16 +23,16 @@ The way you use this module depends on your DM style:
 
 **Feature List**  
 -----------
-- Adds Loot: Generate new loot for tokens while keeping their current items.  
-- Loot Generation Button: Click the coin control in the Actor controls to manually generate loot for a selected token.  
-- Loot on Drop (optional): Drop a token on the canvas to automatically generate loot.  
-- Preview Loot Drops (optional): Enable the loot preview to view the loot drop The window shows the items, their rarities, and a link that opens the item sheet (in case you don't know what the item does). You also have an option to re-roll the drop as many times as you like.  
-- Source Options: Use compendiums, world folders, and roll tables in any combination.  
-- Quantity Settings: Define item counts globally (e.g., "1d4+3").  
-- Global Rarity Settings: Set the global rarity to match your campaign's magic level or your group's current level.   
-- Global Currency Controls: Add coins by CR or fixed formulas, with an adjustable percent chance for currency.  
-- Creature Type Overrides: Customize sources, quantities, and chances for each creature type individually.  
-- Export/Import: Save and load source settings (defaults + overrides) as JSON files.  
+- **Adds Loot:** Generate new loot for tokens while keeping their current items.  
+- **Loot Generation Button:** Click the coin control in the Actor controls to manually generate loot for a selected token.  
+- **Loot on Drop (optional):** Drop a token on the canvas to automatically generate loot.  
+- **Preview Loot Drops (optional):** Enable the loot preview to view the loot drop The window shows the items, their rarities, and a link that opens the item sheet (in case you don't know what the item does). You also have an option to re-roll the drop as many times as you like.  
+- **Source Options:** Use compendiums, world folders, and roll tables in any combination.  
+- **Quantity Settings:** Define item counts globally (e.g., "1d4+3").  
+- **Global Rarity Settings:** Set the global rarity to match your campaign's magic level or your group's current level.   
+- **Global Currency Controls:** Add coins by CR or fixed formulas, with an adjustable percent chance for currency.  
+- **Creature Type Overrides:** Customize sources, quantities, and chances for each creature type individually.  
+- **Export/Import:** Save and load source settings (defaults + overrides) as JSON files.  
 
 
 **Additional Development Notes (FAQ)**
