@@ -1,0 +1,229 @@
+<style>
+    .creature-type-container {
+        display: grid;
+        grid-template-columns: 75px 60px 60px 60px 123px 162px; /* 6 columns: Type, Quantity, Item Chance, Coin Chance, Rarity, Sources */
+        gap: 10px;
+        max-width: 700px;
+        margin: 0 auto;
+        width: 100%;
+        padding: 10px;
+        box-sizing: border-box;
+    }
+
+    .compendium-select-btn, .rarity-select {
+        width: 100%;
+        text-align: left;
+        padding: 8px 12px;
+        font-size: 14px;
+        border: 1px solid #999;
+        background-color: #333;
+        color: white;
+        cursor: pointer;
+        border-radius: 5px;
+        transition: background 0.2s ease-in-out;
+        min-height: 36px;
+        box-sizing: border-box;
+    }
+
+    .compendium-select-btn:hover, .rarity-select:hover, .reset-defaults:hover {
+        background-color: #040404;
+    }
+
+    .compendium-select-btn.custom, .rarity-select.custom {
+        background-color: #27ae60;
+    }
+
+    .compendium-select-btn.custom:hover, .rarity-select.custom:hover {
+        background-color: #145c32;
+    }
+
+    .creature-type-loot-window {
+        min-width: 580px;
+        max-height: 80vh;
+        overflow-y: auto;
+    }
+
+    .header-label {
+        font-weight: bold;
+        text-align: center;
+    }
+
+    .creature-type-label {
+        font-weight: bold;
+    }
+
+    .quantity-input {
+        width: 100%;
+        padding: 4px;
+        border-radius: 5px;
+        background-color: #333;
+        color: white;
+        border: 1px solid #999;
+        box-sizing: border-box;
+        font-weight: bold;
+    }
+
+    .quantity-input::placeholder {
+        color: #888;
+        font-style: italic;
+        font-weight: normal;
+    }
+
+
+    .item-chance-input {
+        width: 100%;
+        padding: 4px;
+        border-radius: 5px;
+        background-color: #333;
+        color: white;
+        border: 1px solid #999;
+        box-sizing: border-box;
+        font-weight: bold; 
+    }
+
+    .item-chance-input::placeholder {
+        color: #888;
+        font-style: italic;
+        font-weight: normal;
+    }
+
+
+    .currency-chance-input {
+        width: 100%;
+        padding: 4px;
+        border-radius: 5px;
+        background-color: #333;
+        color: white;
+        border: 1px solid #999;
+        box-sizing: border-box;
+        font-weight: bold;
+    }
+
+    .currency-chance-input::placeholder {
+        color: #888;
+        font-style: italic;
+        font-weight: normal;
+    }
+
+    .rarity-select {
+        width: 100%;
+        padding: 4px;
+        border-radius: 5px;
+        background-color: #333;
+        color: white;
+        border: 1px solid #999;
+        box-sizing: border-box;
+    }
+
+
+
+input:disabled {
+    background-color: #555; /* Slightly darker gray */
+    color: #888; /* Dimmed text */
+    cursor: not-allowed;
+}
+
+
+.header-label { font-weight: bold; text-align: center; }
+    .creature-type-label { padding: 4px; }
+    .quantity-input, .item-chance-input, .currency-chance-input, .rarity-select, .compendium-select-btn {
+        padding: 4px;
+        border-radius: 5px;
+        background-color: #333;
+        color: white;
+        border: 1px solid #999;
+        text-align: center;
+    }
+    .compendium-select-btn.custom { background-color: #27ae60; }
+    .section-separator {
+        grid-column: 1 / -1;
+        border-top: 1px solid #999;
+        margin-bottom: 10px;
+        text-align: center;
+        font-weight: bold;
+        color: #fff;
+        background: #908f8f;
+        padding: 1px;
+
+    }
+
+       .reset-defaults, .export-sources, .import-sources {
+        font-size: 14px; 
+        border: 1px solid #999; 
+        background-color: #333; 
+        color: white; 
+        border-radius: 5px; 
+        cursor: pointer; 
+        margin-bottom:1px;
+        width: 50%;
+       }
+
+
+    .reset-defaults i {
+        margin-right: 5px;
+    }
+
+    .override-note {
+        grid-column: 1 / -1;
+        text-align: center;
+        color: #000000;
+        font-size: 14px;
+    }
+
+.button-block {
+grid-column: 1 / -1; 
+text-align: center; 
+margin-top: 10px;
+margin-bottom: 20px;
+}
+
+</style>
+
+
+<form class="creature-type-container" autocomplete="off" onsubmit="event.preventDefault();">
+    <div class="override-note">Override the default settings for each creature type by entering new values below.</div>
+
+    <div class="button-block">
+        <button type="button" class="export-sources" ><i class="fas fa-download"></i> Export Sources</button>
+        <button type="button" class="import-sources"  ><i class="fas fa-upload"></i> Import Sources</button>
+        <button type="button" class="reset-defaults"><i class="fas fa-ban"></i> Reset to Defaults</button>
+    </div>
+    <span class="header-label">Creature Type</span>
+    <span class="header-label">Item Quantity</span>
+    <span class="header-label">Item Chance</span>
+    <span class="header-label">Coin Chance</span>
+    <span class="header-label">Max Rarity</span>
+    <span class="header-label">Sources</span>
+    {{#each creatureTypes}}
+    <span class="creature-type-label">{{label}}</span>
+    <input type="text" class="quantity-input" data-creature-type="{{key}}" value="{{quantityFormula}}" placeholder="{{../globalQuantityFormula}}" title="Loot Quantity Formula">
+    <input type="number" class="item-chance-input" data-creature-type="{{key}}" value="{{itemChance}}" min="0" max="100" placeholder="{{../globalItemChance}}" title="Item Chance (%)">
+    <input type="number" class="currency-chance-input" data-creature-type="{{key}}" value="{{currencyChance}}" min="0" max="100" placeholder="{{../globalCurrencyChance}}" title="Currency Chance (%)">
+    <select class="rarity-select {{#if maxRarity}}custom{{/if}}" data-creature-type="{{key}}">
+        <option value="" {{#unless maxRarity}}selected{{/unless}}>[Default Rarity]</option>
+        <option value="Common" {{#if (eq maxRarity "Common")}}selected{{/if}}>Common</option>
+        <option value="Uncommon" {{#if (eq maxRarity "Uncommon")}}selected{{/if}}>Uncommon</option>
+        <option value="Rare" {{#if (eq maxRarity "Rare")}}selected{{/if}}>Rare</option>
+        <option value="Very Rare" {{#if (eq maxRarity "Very Rare")}}selected{{/if}}>Very Rare</option>
+        <option value="Legendary" {{#if (eq maxRarity "Legendary")}}selected{{/if}}>Legendary</option>
+    </select>
+    <button type="button" class="compendium-select-btn {{#if (gt totalSources 0)}}custom{{/if}}" data-creature-type="{{key}}">{{selectedLabel}}</button>
+    {{#unless @last}}
+    <div class="section-separator"></div>
+    {{/unless}}
+    {{/each}}
+
+</form>
+
+
+
+
+
+
+
+
+
+
+
+
+

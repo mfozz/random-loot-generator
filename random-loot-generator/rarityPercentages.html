@@ -1,0 +1,15 @@
+<form>
+    <div class="form-group" style="display: flex; flex-direction: column; gap: 10px;">
+        {{#each percentages}}
+        <div style="display: flex; align-items: center;">
+            <label style="width: 120px;">{{@key}}</label>
+            <input type="number" name="{{@key}}" value="{{this}}" min="0" max="100" style="width: 60px; margin-right: 10px;">
+            <span>%</span>
+        </div>
+        {{/each}}
+    </div>
+    <div style="margin-top: 10px;">
+        <button type="button" class="save-percentages"><i class="fas fa-save"></i>Save</button>
+        <button type="button" class="restore-defaults"><i class="fas fa-repeat"></i>Restore Defaults</button>
+    </div>
+</form>
