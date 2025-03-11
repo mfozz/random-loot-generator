@@ -5,6 +5,11 @@ Generate random loot for your NPCs manually or automatically.
 
 
 
+Manual Download:
+-----------
+https://github.com/mfozz/random-loot-generator/releases/latest/download/module.json
+
+
 Random Loot Generator  
 =======
 
