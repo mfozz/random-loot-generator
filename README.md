@@ -1,6 +1,7 @@
 # random-loot-generator
 Generate random loot for your NPCs manually or automatically.
 
+![Screenshot 2025-03-11 at 10 01 31 AM](https://github.com/user-attachments/assets/af793a95-dcdc-4eb1-97b9-7f7d8f311692)
 
 
 
@@ -19,7 +20,15 @@ The way you use this module depends on your DM style:
 - Loot Miser: Set just a few sources (maybe just one) and set the currency chance low. You'll get a bit of extra junk…I mean loot.  
 - Lazy DM: Click some stuff randomly and don't worry too much about it. All the items and coins are just extra, so you're probably not breaking anything. Maybe.  
 - Control Freak: Create a bunch of custom curated folders, roll tables, and compendiums by CR, creature type, genre, environment, and astrological sign. You do you; get funky.  
-- Monty Python: Turn everything up to 11 and add every source that shows up in the list.  
+- Monty Python: Turn everything up to 11 and add every source that shows up in the list.
+
+
+
+
+
+![Screenshot 2025-03-11 at 10 02 11 AM](https://github.com/user-attachments/assets/88513125-a7ad-4780-a36b-c156417b8bdd)
+
+
 
 **Feature List**  
 -----------
