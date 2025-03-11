@@ -8,18 +8,21 @@ Random Loot Generator
 =======
 
 **Why do I need this module?**  
+-----------
 Are your players a bunch of loot goblins who salivate over all the random junk you throw at them? Want to add more junk to NPC tokens with very little effort? Then, this is the module for you.  
 
 This module adds loot to NPC tokens without replacing their existing items, speeding up loot generation. The module can pull from compendiums, folders, and roll tables—world items or compendium-direct—and lets you tweak quantities, rarities, and currency through global settings or creature-specific overrides.   
 
 **What's the best way to use this module?**  
-The way you use this module depends on your DM style:  
+-----------
+The way you use this module depends on your DM style:   
 - Loot Miser: Set just a few sources (maybe just one) and set the currency chance low. You'll get a bit of extra junk…I mean loot.  
 - Lazy DM: Click some stuff randomly and don't worry too much about it. All the items and coins are just extra, so you're probably not breaking anything. Maybe.  
 - Control Freak: Create a bunch of custom curated folders, roll tables, and compendiums by CR, creature type, genre, environment, and astrological sign. You do you; get funky.  
 - Monty Python: Turn everything up to 11 and add every source that shows up in the list.  
 
 **Feature List**  
+-----------
 - Adds Loot: Generate new loot for tokens while keeping their current items.  
 - Loot Generation Button: Click the coin control in the Actor controls to manually generate loot for a selected token.  
 - Loot on Drop (optional): Drop a token on the canvas to automatically generate loot.  
@@ -33,6 +36,7 @@ The way you use this module depends on your DM style:
 
 
 **Additional Development Notes (FAQ)**
+-----------
 
 This module seems to duplicate what other modules do. Was that on purpose?
 - Yes and no. Pocket Change has mostly been abandoned, so I added a similar feature to this module. Any other similarities with other modules are purely a strange coincidence.
