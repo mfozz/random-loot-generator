@@ -59,7 +59,7 @@ Why is the loot generation slow?
 - Pulling from compendiums or large folders can take a few moments because of all the dice rolls in the background. For example, Items (SRD) has over 800 items that the module has to check before generating the loot. Considering using smaller folders or downloaded folders if the selected sources are too slow. 
 
 Where are the currency formulas?
-- The CR currency roles are baked into the code. I tweaked the rolls to be a bit lower to account for the extra chance of loot. It's pretty easy to add more coins if you feel like a drop wasn't rich enough, but it's harder to remove extra coins. 
+- The CR currency roles are baked into the code. I tweaked the rolls to be a bit lower to account for the extra chance of loot. It's pretty easy to add more coins if you think that a drop wasn't rich enough, but it's harder to remove extra coins. 
 
 I'm not getting any results from my roll table?
 - Verify that your roll table has items.
