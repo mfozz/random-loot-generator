@@ -56,7 +56,7 @@ This module seems to duplicate what other modules do. Was that on purpose?
 - Yes and no. Pocket Change has mostly been abandoned, so I added a similar feature to this module. Any other similarities with other modules are purely a strange coincidence.
 
 Why is the loot generation slow?
-- Pulling from compendiums or large folders can take a few moments because of all the dice rolls in the background. For example, Items (SRD) has over 800 items that the module has to check before generating the loot. Considering using smaller folders or downloaded folders if the selected sources are too slow. 
+- Pulling from compendiums or large folders can take a few moments because of all the dice rolls in the background. For example, Items (SRD) has over 800 items that the module has to check before generating the loot. Consider using smaller folders or downloaded folders if the selected sources are too slow. 
 
 Where are the currency formulas?
 - The CR currency roles are baked into the code. I tweaked the rolls to be a bit lower to account for the extra chance of loot. It's pretty easy to add more coins if you think that a drop wasn't rich enough, but it's harder to remove extra coins. 
