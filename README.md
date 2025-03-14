@@ -1,5 +1,5 @@
 # random-loot-generator
-Generate random loot for your NPCs manually or automatically.
+Generate random loot for your NPCs manually or automatically.  
 ![Foundry Core Compatible Version](https://img.shields.io/badge/dynamic/json.svg?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmfozz%2Frandom-loot-generator%2Fmain%2Fmodule.json&label=Foundry%20Version&query=$.compatibleCoreVersion&colorB=orange)
 ![Latest Release](https://img.shields.io/github/v/release/mfozz/random-loot-generator)
 ![Downloads](https://img.shields.io/github/downloads/mfozz/random-loot-generator/total)
