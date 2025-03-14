@@ -7,7 +7,7 @@ Generate random loot for your NPCs manually or automatically.
 ![Latest Release](https://img.shields.io/github/v/release/mfozz/random-loot-generator)
 ![Downloads](https://img.shields.io/github/downloads/mfozz/random-loot-generator/total)
 [![Forge Installs](https://img.shields.io/badge/dynamic/json?label=Forge%20Installs&query=package.installs&suffix=%25&url=https%3A%2F%2Fforge-vtt.com%2Fapi%2Fbazaar%2Fpackage%2Frandom-loot-generator&colorB=4aa94a)](https://forge-vtt.com/bazaar#package=random-loot-generator)
-[![Foundry Hub Endorsements](https://img.shields.io/endpoint?logoColor=white&url=https%3A%2F%2Fwww.foundryvtt-hub.com%2Fwp-json%2Fhubapi%2Fv1%2Fpackage%2Frandom-loot-generator%2Fshield%2Fendorsements)](https://www.foundryvtt-hub.com/package/random-loot-generator/)
+
 
 
 
