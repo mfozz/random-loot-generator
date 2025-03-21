@@ -74,7 +74,9 @@ Are there any module conflicts?
 
 Can I use a macro to trigger the loot generation?
 - Yes, use the following macro:
-- game.lootGenerator.generateLootForTokens(canvas.tokens.controlled);
+'''
+game.lootGenerator.generateLootForTokens(canvas.tokens.controlled);
+'''
 
 Can this module add loot to player tokens/actors?
 - Yes, but why are you that nice? Let them work for it. Kidding aside, it does, but you probably wouldn't be able to set custom treasure settings, just the default ones. 
