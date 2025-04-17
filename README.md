@@ -50,7 +50,8 @@ The way you use this module depends on your DM style:
 - **Quantity Settings:** Define item counts globally (e.g., "1d4+3").  
 - **Global Rarity Settings:** Set the global rarity to match your campaign's magic level or your group's current level.   
 - **Global Currency Controls:** Add coins by CR or fixed formulas, with an adjustable percent chance for currency.  
-- **Creature Type Overrides:** Customize sources, quantities, and chances for each creature type individually.  
+- **Creature Type Overrides:** Customize sources, quantities, and chances for each creature type individually.
+- **(NEW)Token-Specific Overrides:** Customize the settings at the token level through token settings. 
 - **Export/Import:** Save and load source settings (defaults + overrides) as JSON files.  
 
 
