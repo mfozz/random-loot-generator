@@ -4,22 +4,22 @@ class LootGenerator {
         this.lootPreviewEnabled = false;
         this.selectedCompendiums = [];
         this.selectedFolders = [];
-        this.selectedTables = []; // Add this
+        this.selectedTables = [];
         this.generateLootForTokens = this.generateLootForTokens.bind(this);
         this.applyLoot = this.applyLoot.bind(this);
-        this.loadSettings(); // Call here to sync defaults
+        this.loadSettings();
     }
 
     loadSettings() {
         console.log("Loading settings...");
         this.lootPreviewEnabled = game.settings.get(this.moduleName, "enableLootPreview");
-        let rawCompendiums = game.settings.get(this.moduleName, "selectedCompendiums") || "dnd5e.tradegoods"; // Default here
+        let rawCompendiums = game.settings.get(this.moduleName, "selectedCompendiums") || "dnd5e.tradegoods";
         let loadedFolders = game.settings.get(this.moduleName, "selectedFolders");
-        let loadedTables = game.settings.get(this.moduleName, "lootTables") || []; // Add tables
+        let loadedTables = game.settings.get(this.moduleName, "lootTables") || [];
         console.log("Raw settings - Compendiums:", rawCompendiums, "Folders:", loadedFolders, "Tables:", loadedTables);
         this.selectedCompendiums = (typeof rawCompendiums === "string" && rawCompendiums) 
             ? rawCompendiums.split(",").map(comp => comp.trim()).filter(comp => comp && game.packs.has(comp)) 
-            : ["dnd5e.tradegoods"]; // Fallback if empty
+            : ["dnd5e.tradegoods"];
         this.selectedFolders = Array.isArray(loadedFolders) && loadedFolders.length > 0 
             ? loadedFolders.filter(id => game.folders.has(id)) 
             : [];
@@ -36,8 +36,6 @@ class LootGenerator {
             selectedTables: this.selectedTables
         });
     }
-
-
 
     async generateLootForTokens(tokens) {
         console.log("generateLootForTokens called with tokens:", tokens);
@@ -64,31 +62,48 @@ class LootGenerator {
         let creatureLootSettings = game.settings.get(this.moduleName, "creatureTypeLoot") || {};
         let typeSettings = creatureLootSettings[creatureType] || {};
     
-        let hasTypeSettings = (Array.isArray(typeSettings.compendiums) && typeSettings.compendiums.length > 0) || 
-                             (Array.isArray(typeSettings.folders) && typeSettings.folders.length > 0) || 
-                             (Array.isArray(typeSettings.tables) && typeSettings.tables.length > 0);
+        // Check for token-specific settings
+        let lootSettings = {};
+        const customLootEnabled = await token.actor.getFlag(this.moduleName, "customLootEnabled") || false;
+        if (customLootEnabled) {
+            lootSettings = (await token.actor.getFlag(this.moduleName, "lootSettings")) || {};
+            console.log(`Using custom loot settings for ${token.name}:`, lootSettings);
+        } else {
+            lootSettings = typeSettings;
+            console.log(`Using creature type settings for ${creatureType}:`, lootSettings);
+        }
+    
+        let hasTypeSettings = customLootEnabled ? (
+            (Array.isArray(lootSettings.compendiums) && lootSettings.compendiums.length > 0) || 
+            (Array.isArray(lootSettings.folders) && lootSettings.folders.length > 0) || 
+            (Array.isArray(lootSettings.tables) && lootSettings.tables.length > 0)
+        ) : (
+            (Array.isArray(typeSettings.compendiums) && typeSettings.compendiums.length > 0) || 
+            (Array.isArray(typeSettings.folders) && typeSettings.folders.length > 0) || 
+            (Array.isArray(typeSettings.tables) && typeSettings.tables.length > 0)
+        );
     
         let selectedCompendiums = hasTypeSettings 
-            ? (Array.isArray(typeSettings.compendiums) ? typeSettings.compendiums : []) 
+            ? (Array.isArray(lootSettings.compendiums) ? lootSettings.compendiums : []) 
             : (this.selectedCompendiums.length > 0 ? this.selectedCompendiums : game.settings.get(this.moduleName, "selectedCompendiums").split(",").map(comp => comp.trim()).filter(comp => comp && game.packs.has(comp)));
         let selectedFolders = hasTypeSettings 
-            ? (Array.isArray(typeSettings.folders) ? typeSettings.folders : []) 
+            ? (Array.isArray(lootSettings.folders) ? lootSettings.folders : []) 
             : (this.selectedFolders.length > 0 ? this.selectedFolders : game.settings.get(this.moduleName, "selectedFolders") || []);
         let selectedTables = hasTypeSettings 
-            ? (Array.isArray(typeSettings.tables) ? typeSettings.tables : []) 
+            ? (Array.isArray(lootSettings.tables) ? lootSettings.tables : []) 
             : (this.selectedTables.length > 0 ? this.selectedTables : game.settings.get(this.moduleName, "lootTables") || []);
-        let quantityFormula = typeSettings.quantityFormula || game.settings.get(this.moduleName, "randomQuantityFormula") || "1d4";
-        let currencyChance = typeSettings.currencyChance !== null && typeSettings.currencyChance !== undefined && typeSettings.currencyChance !== "" ? typeSettings.currencyChance : game.settings.get(this.moduleName, "defaultCurrencyChance") || 75;
-        let itemChance = typeSettings.itemChance !== null && typeSettings.itemChance !== undefined && typeSettings.itemChance !== "" ? typeSettings.itemChance : 100;
+        let quantityFormula = lootSettings.quantityFormula || game.settings.get(this.moduleName, "randomQuantityFormula") || "1d4";
+        let currencyChance = lootSettings.currencyChance !== null && lootSettings.currencyChance !== undefined && lootSettings.currencyChance !== "" ? lootSettings.currencyChance : game.settings.get(this.moduleName, "defaultCurrencyChance") || 75;
+        let itemChance = lootSettings.itemChance !== null && lootSettings.itemChance !== undefined && lootSettings.itemChance !== "" ? lootSettings.itemChance : 100;
     
-        console.log(`Fetching loot for ${creatureType}. Has type settings: ${hasTypeSettings}. Using compendiums:`, selectedCompendiums, "Folders:", selectedFolders, "Tables:", selectedTables, "Quantity Formula:", quantityFormula, "Item Chance:", itemChance, "Currency Chance:", currencyChance);
+        console.log(`Fetching loot for ${creatureType}. Custom enabled: ${customLootEnabled}. Using compendiums:`, selectedCompendiums, "Folders:", selectedFolders, "Tables:", selectedTables, "Quantity Formula:", quantityFormula, "Item Chance:", itemChance, "Currency Chance:", currencyChance);
     
         if (!selectedCompendiums.length && !selectedFolders.length && !selectedTables.length) {
-            ui.notifications.warn(`No compendiums, folders, or tables selected for ${creatureType} or defaults.`);
+            ui.notifications.warn(`No compendiums, folders, or tables selected for ${customLootEnabled ? token.name : creatureType} or defaults.`);
             return { items: [], currency: {} };
         }
     
-        let maxRarity = typeSettings.maxRarity || game.settings.get(this.moduleName, "maxRarity") || "Legendary";
+        let maxRarity = lootSettings.maxRarity || game.settings.get(this.moduleName, "maxRarity") || "Legendary";
         let rarityLevels = ["Common", "Uncommon", "Rare", "Very Rare", "Legendary"];
         let allowedRarities = rarityLevels.slice(0, rarityLevels.indexOf(maxRarity) + 1);
         console.log("Allowed rarities:", allowedRarities);
@@ -217,7 +232,7 @@ class LootGenerator {
                 }
     
                 if (!allItems.length) {
-                    ui.notifications.warn(`No valid items found in compendiums or folders for ${creatureType}.`);
+                    ui.notifications.warn(`No valid items found in compendiums or folders for ${customLootEnabled ? token.name : creatureType}.`);
                 } else {
                     let filteredItems = allItems.filter(item => {
                         let rarity = item.system?.rarity || "Common";
@@ -228,7 +243,7 @@ class LootGenerator {
                     });
                     console.log("Filtered items:", filteredItems.map(i => ({ name: i.name, rarity: i.system?.rarity })));
                     if (!filteredItems.length) {
-                        ui.notifications.warn(`No items of allowed rarities found for ${creatureType}.`);
+                        ui.notifications.warn(`No items of allowed rarities found for ${customLootEnabled ? token.name : creatureType}.`);
                     } else {
                         let quantity = 1;
                         if (/^\d+$/.test(quantityFormula)) {
@@ -270,7 +285,7 @@ class LootGenerator {
                         console.log("Adjusted percentages:", adjustedPercentages, "Total weight:", totalAvailableWeight);
     
                         if (totalAvailableWeight === 0) {
-                            ui.notifications.warn(`No rarity percentages set for available items in ${creatureType}.`);
+                            ui.notifications.warn(`No rarity percentages set for available items in ${customLootEnabled ? token.name : creatureType}.`);
                         } else {
                             for (let i = 0; i < quantity; i++) {
                                 let roll = Math.random() * totalAvailableWeight;
@@ -302,7 +317,7 @@ class LootGenerator {
                 }
             }
         } else {
-            console.log(`No items generated for ${creatureType} (roll ${itemRoll.toFixed(1)} vs ${itemChance}%)`);
+            console.log(`No items generated for ${customLootEnabled ? token.name : creatureType} (roll ${itemRoll.toFixed(1)} vs ${itemChance}%)`);
         }
     
         let currency = { cp: 0, sp: 0, gp: 0, pp: 0 };
@@ -344,7 +359,7 @@ class LootGenerator {
                 }
                 console.log(`Generated CR-based currency for CR ${cr}:`, currency);
             } else {
-                console.log(`No currency generated for ${creatureType} (roll ${currencyRoll.toFixed(1)} vs ${currencyChance}%)`);
+                console.log(`No currency generated for ${customLootEnabled ? token.name : creatureType} (roll ${currencyRoll.toFixed(1)} vs ${currencyChance}%)`);
             }
         } else {
             let currencyFormula = game.settings.get(this.moduleName, "currencyFormula") || "1d10";
@@ -372,7 +387,7 @@ class LootGenerator {
                     ui.notifications.error(`Invalid currency formula: "${currencyFormula}". No currency generated.`);
                 }
             } else {
-                console.log(`No currency generated for ${creatureType} (roll ${currencyRoll.toFixed(1)} vs ${currencyChance}%)`);
+                console.log(`No currency generated for ${customLootEnabled ? token.name : creatureType} (roll ${currencyRoll.toFixed(1)} vs ${currencyChance}%)`);
             }
         }
     
@@ -384,11 +399,10 @@ class LootGenerator {
             .filter(([_, v]) => v > 0)
             .map(([k, v]) => `${v} ${k.toUpperCase()}`)
             .join(", ") || "None";
-        console.log(`Loot Summary for ${creatureType}: ${itemCount} item${itemCount === 1 ? "" : "s"} ${raritySummary}, ${currencySummary}`);
+        console.log(`Loot Summary for ${customLootEnabled ? token.name : creatureType}: ${itemCount} item${itemCount === 1 ? "" : "s"} ${raritySummary}, ${currencySummary}`);
     
         return { items: lootItems, currency };
     }
-
 
     applyLoot(lootAssignments) {
         for (let [tokenId, loot] of Object.entries(lootAssignments)) {
@@ -417,327 +431,292 @@ class LootGenerator {
         ui.notifications.info("Loot applied to selected NPCs.");
     }
 
-
-    
-        showLootPreview(lootAssignments, tokens) {
-            let content = `
-                <style>
-                    .loot-item { display: flex; align-items: center; gap: 10px; }
-                    .loot-img { width: 30px; height: 30px; border-radius: 5px; }
-                    .loot-item.common { color:rgb(117, 113, 113); }
-                    .loot-item.uncommon { color:rgb(3, 182, 3); }
-                    .loot-item.rare { color: #0000ff; }
-                    .loot-item.very-rare { color: #ff00ff; }
-                    .loot-item.legendary { color:rgb(226, 157, 9); }
-                    .item-link { cursor: pointer; text-decoration: underline; }
-                    .item-link:hover { opacity: 0.8; }
-                </style>`;
-            tokens.forEach(token => {
-                let loot = lootAssignments[token.id];
-                let itemList = loot.items
-                    .map((item, index) => {
-                        const rarity = (item.system?.rarity || "Common").toLowerCase().replace("very rare", "very-rare");
-                        const itemId = item._id || `temp-${index}`;
-                        const pack = item.pack || "";
-                        return `<div class="loot-item ${rarity}">
-                            <img src="${item.img}" class="loot-img">
-                            <a class="item-link" data-item-id="${itemId}" data-pack="${pack}">${item.name}</a>
-                        </div>`;
-                    })
-                    .join("");
-                let currencyList = Object.entries(loot.currency)
-                    .filter(([_, val]) => val > 0)
-                    .map(([type, val]) => `${val} ${type.toUpperCase()}`)
-                    .join(", ");
-                let currencyText = currencyList ? `Currency: ${currencyList}` : "Currency: None";
-                content += `<strong>${token.name}:</strong><br>${itemList}<br>${currencyText}<br><br>`;
-            });
-            const dialog = new Dialog({
-                title: "Loot Preview",
-                content: content,
-                buttons: {
-                    reroll: { label: "Re-Roll", callback: () => this.generateLootForTokens(tokens) },
-                    apply: { label: "Apply Loot", callback: () => this.applyLoot(lootAssignments) }
-                },
-                render: (html) => {
-                    html.find(".item-link").on("click", (event) => {
-                        const $link = $(event.currentTarget);
-                        const itemId = $link.data("item-id");
-                        const pack = $link.data("pack");
-                        console.log(`Clicked item: ID=${itemId}, Pack=${pack}`);
-                        this.openItemSheet(itemId, pack);
-                    });
-                }
-            });
-            dialog.render(true);
-        }
-        openItemSheet(itemId, pack = "") {
-            console.log(`Opening item sheet: ID=${itemId}, Pack=${pack}`);
-            if (pack) {
-                game.packs.get(pack)?.getDocument(itemId).then(item => {
-                    if (item) {
-                        console.log(`Found compendium item: ${item.name}`);
-                        item.sheet.render(true);
-                    } else {
-                        console.warn(`Item ${itemId} not found in pack ${pack}`);
-                    }
-                });
-            } else {
-                const item = game.items.get(itemId);
-                if (item) {
-                    console.log(`Found world item: ${item.name}`);
-                    item.sheet.render(true);
-                } else {
-                    console.warn(`Item ${itemId} not found in world items`);
-                }
-            }
-        }
-    
-
-    
-        openItemSheet(itemId, pack = "") {
-            console.log(`Opening item sheet: ID=${itemId}, Pack=${pack}`); // Debug: called?
-            if (pack) {
-                game.packs.get(pack)?.getDocument(itemId).then(item => {
-                    if (item) {
-                        console.log(`Found compendium item: ${item.name}`);
-                        item.sheet.render(true);
-                    } else {
-                        console.warn(`Item ${itemId} not found in pack ${pack}`);
-                    }
-                });
-            } else {
-                const item = game.items.get(itemId);
-                if (item) {
-                    console.log(`Found world item: ${item.name}`);
-                    item.sheet.render(true);
-                } else {
-                    console.warn(`Item ${itemId} not found in world items`);
-                }
-            }
-        }
-    
-
-
-        
-
-        
-        showCompendiumSelection() {
-            const packs = game.packs.contents.filter(p => p.metadata.type === "Item");
-            const folders = game.folders.filter(f => f.type === "Item" && f.contents.length > 0);
-            const tables = game.tables.contents;
-        
-            let content = `<div style="max-height: 400px; overflow-y: auto;">`;
-            content += `<h3>Compendiums</h3>`;
-            content += packs.map(pack => {
-                let checked = this.selectedCompendiums.includes(pack.collection) ? "checked" : "";
-                return `<label style="display: inline-flex; align-items: center; gap: 6px;"><input type="checkbox" name="compendium" value="${pack.collection}" ${checked}> ${pack.metadata.label}</label><br>`;
-            }).join("");
-            content += `<h3>Folders</h3>`;
-            content += folders.map(folder => {
-                let checked = this.selectedFolders.includes(folder.id) ? "checked" : "";
-                return `<label style="display: inline-flex; align-items: center; gap: 6px;"><input type="checkbox" name="folder" value="${folder.id}" ${checked}> ${folder.name}</label><br>`;
-            }).join("");
-            content += `<h3>Roll Tables</h3>`;
-            content += tables.map(table => {
-                let checked = this.selectedTables.includes(table.id) ? "checked" : "";
-                return `<label style="display: inline-flex; align-items: center; gap: 6px;"><input type="checkbox" name="table" value="${table.id}" ${checked}> ${table.name}</label><br>`;
-            }).join("");
-            content += `</div>`;
-        
-            new Dialog({
-                title: "Manage Loot Sources",
-                content: content,
-                buttons: {
-                    save: {
-                        icon: '<i class="fas fa-save"></i>',
-                        label: "Save",
-                        callback: (html) => {
-                            this.selectedCompendiums = html.find("input[name='compendium']:checked").map((_, el) => el.value).get();
-                            this.selectedFolders = html.find("input[name='folder']:checked").map((_, el) => el.value).get();
-                            this.selectedTables = html.find("input[name='table']:checked").map((_, el) => el.value).get();
-                            game.settings.set(this.moduleName, "selectedCompendiums", this.selectedCompendiums.join(","));
-                            game.settings.set(this.moduleName, "selectedFolders", this.selectedFolders);
-                            game.settings.set(this.moduleName, "lootTables", this.selectedTables);
-                            console.log("Default loot sources updated:", { compendiums: this.selectedCompendiums, folders: this.selectedFolders, tables: this.selectedTables });
-                        }
-                    },
-                    cancel: { 
-                        icon: '<i class="fas fa-times"></i>',
-                        label: "Cancel" }
-                }
-            }).render(true);
-        }
-
-        }
-
-
-
-        Hooks.once("init", () => {
-            console.log("🔄 Random Loot Generator: INIT HOOK STARTED!");
-        
-            game.settings.register("random-loot-generator", "enableLootPreview", {
-                name: "Enable Loot Preview",
-                hint: "If enabled, a preview window appears with options that let you accept or reroll the items.",
-                scope: "world",
-                config: true,
-                type: Boolean,
-                default: true,
-                onChange: value => {
-                    if (game.lootGenerator) {
-                        game.lootGenerator.lootPreviewEnabled = value;
-                        console.log(`Loot Preview setting updated: ${value}`);
-                    }
-                }
-            });
-        
-            game.settings.register("random-loot-generator", "enableAutoLoot", {
-                name: "Enable Auto-Loot on Token Drop",
-                hint: "If enabled, random loot will automatically be assigned to NPC tokens when they are dragged onto the canvas.",
-                scope: "world",
-                config: true,
-                type: Boolean,
-                default: false,
-                onChange: value => console.log(`Auto-Loot setting updated: ${value}`)
-            });
-        
-            game.settings.register("random-loot-generator", "randomQuantityFormula", {
-                name: "Random Item Quantity",
-                hint: "Enter a dice formula (such as 1d4 or 1d3+12) or a static number (e.g., 5) to determine the default number of items generated.",
-                scope: "world",
-                config: true,
-                type: String,
-                default: "1d4",
-                onChange: value => console.log(`Random Quantity Formula updated: ${value}`)
-            });
-        
-            game.settings.register("random-loot-generator", "maxRarity", {
-                name: "Maximum Loot Rarity",
-                hint: "Choose the default maximum level of rarity that you want to generate. Choose a lower rarity for lower CR games and low-magic worlds.",
-                scope: "world",
-                config: true,
-                type: String,
-                choices: { "Common": "Common", "Uncommon": "Uncommon", "Rare": "Rare", "Very Rare": "Very Rare", "Legendary": "Legendary" },
-                default: "Legendary",
-                onChange: value => console.log(`Max Rarity setting updated: ${value}`)
-            });
-        
-            game.settings.register("random-loot-generator", "selectedCompendiums", {
-                name: "Select Loot Sources",
-                hint: "Choose which default sources to pull loot from (compendiums, folders, or roll tables).",
-                scope: "world",
-                config: true,
-                type: String,
-                default: "dnd5e.tradegoods", // Set default here
-                onChange: value => {
-                    if (game.lootGenerator && game.packs) {
-                        game.lootGenerator.selectedCompendiums = typeof value === "string" ? value.split(",").map(comp => comp.trim()).filter(comp => comp && game.packs.has(comp)) : ["dnd5e.tradegoods"];
-                        console.log(`Compendium selection updated: ${game.lootGenerator.selectedCompendiums}`);
-                    }
-                }
-            });
-        
-            game.settings.register("random-loot-generator", "useCRBasedCurrency", {
-                name: "Use CR-Based Currency",
-                hint: "Scale the currency by creature Challenge Rating (CR) instead of using a fixed formula.",
-                scope: "world",
-                config: true,
-                type: Boolean,
-                default: false,
-                onChange: value => console.log(`CR-Based Currency setting updated: ${value}`)
-            });
-        
-            game.settings.register("random-loot-generator", "defaultCurrencyChance", {
-                name: "Default Currency Chance",
-                hint: "Set the global percentage chance for creatures to carry currency (0-100%), overridden by creature type settings.",
-                scope: "world",
-                config: true,
-                type: Number,
-                range: { min: 0, max: 100, step: 1 },
-                default: 75,
-                onChange: value => console.log(`Default Currency Chance updated: ${value}%`)
-            });
-        
-            game.settings.register("random-loot-generator", "currencyFormula", {
-                name: "Currency Formula",
-                hint: "Set a custom dice formula for generating currency (e.g., '1d10' for gold base amount). This feature is off if you use the CR-based currency option.",
-                scope: "world",
-                config: true,
-                type: String,
-                default: "1d10",
-                onChange: value => console.log(`Currency Formula updated: ${value}`)
-            });
-        
-            game.settings.register("random-loot-generator", "selectedFolders", {
-                name: "Default Loot Folders",
-                hint: "Choose world folders to pull items from.",
-                scope: "world",
-                config: false,
-                type: Array,
-                default: []
-            });
-        
-            game.settings.register("random-loot-generator", "creatureTypeLoot", {
-                name: "Creature Type Loot",
-                hint: "Assign specific loot compendiums and folders to different creature types.",
-                scope: "world",
-                config: false,
-                type: Object,
-                default: {}
-            });
-        
-            game.settings.registerMenu("random-loot-generator", "creatureTypeLootMenu", {
-                name: "Manage Creature Type Loot",
-                label: "Configure",
-                hint: "Override the default settings by selecting different compendiums and folders for different creature types.",
-                icon: "fas fa-dragon",
-                type: CreatureTypeLootForm,
-                restricted: true
-            });
-        
-            game.settings.register("random-loot-generator", "rarityPercentages", {
-                name: "Rarity Percentages",
-                hint: "Percentage distribution for item rarities.",
-                scope: "world",
-                config: false,
-                type: Object,
-                default: {
-                    "Common": 50,
-                    "Uncommon": 30,
-                    "Rare": 15,
-                    "Very Rare": 4,
-                    "Legendary": 1
-                }
-            });
-        
-            game.settings.registerMenu("random-loot-generator", "rarityPercentagesMenu", {
-                name: "Manage Rarity Percentages",
-                label: "Edit Percentages",
-                hint: "Adjust the percentage chance for each rarity level.",
-                icon: "fas fa-percentage",
-                type: RarityPercentagesForm,
-                restricted: true
-            });
-        
-            game.settings.register("random-loot-generator", "lootTables", {
-                name: "Loot Tables",
-                hint: "Selected RollTables for creature type loot overrides.",
-                scope: "world",
-                config: false,
-                type: Array,
-                default: []
-            });
-        
-            game.lootGenerator = new LootGenerator();
-            Hooks.once("ready", () => {
-                game.lootGenerator.loadSettings();
-                console.log("Loot Generator initialized successfully!", game.lootGenerator);
-            });
-        
-            console.log("✅ INIT HOOK COMPLETED!");
+    showLootPreview(lootAssignments, tokens) {
+        let content = `
+            <style>
+                .loot-item { display: flex; align-items: center; gap: 10px; }
+                .loot-img { width: 30px; height: 30px; border-radius: 5px; }
+                .loot-item.common { color:rgb(117, 113, 113); }
+                .loot-item.uncommon { color:rgb(3, 182, 3); }
+                .loot-item.rare { color: #0000ff; }
+                .loot-item.very-rare { color: #ff00ff; }
+                .loot-item.legendary { color:rgb(226, 157, 9); }
+                .item-link { cursor: pointer; text-decoration: underline; }
+                .item-link:hover { opacity: 0.8; }
+            </style>`;
+        tokens.forEach(token => {
+            let loot = lootAssignments[token.id];
+            let itemList = loot.items
+                .map((item, index) => {
+                    const rarity = (item.system?.rarity || "Common").toLowerCase().replace("very rare", "very-rare");
+                    const itemId = item._id || `temp-${index}`;
+                    const pack = item.pack || "";
+                    return `<div class="loot-item ${rarity}">
+                        <img src="${item.img}" class="loot-img">
+                        <a class="item-link" data-item-id="${itemId}" data-pack="${pack}">${item.name}</a>
+                    </div>`;
+                })
+                .join("");
+            let currencyList = Object.entries(loot.currency)
+                .filter(([_, val]) => val > 0)
+                .map(([type, val]) => `${val} ${type.toUpperCase()}`)
+                .join(", ");
+            let currencyText = currencyList ? `Currency: ${currencyList}` : "Currency: None";
+            content += `<strong>${token.name}:</strong><br>${itemList}<br>${currencyText}<br><br>`;
         });
+        const dialog = new Dialog({
+            title: "Loot Preview",
+            content: content,
+            buttons: {
+                reroll: { label: "Re-Roll", callback: () => this.generateLootForTokens(tokens) },
+                apply: { label: "Apply Loot", callback: () => this.applyLoot(lootAssignments) }
+            },
+            render: (html) => {
+                html.find(".item-link").on("click", (event) => {
+                    const $link = $(event.currentTarget);
+                    const itemId = $link.data("item-id");
+                    const pack = $link.data("pack");
+                    console.log(`Clicked item: ID=${itemId}, Pack=${pack}`);
+                    this.openItemSheet(itemId, pack);
+                });
+            }
+        });
+        dialog.render(true);
+    }
 
+    openItemSheet(itemId, pack = "") {
+        console.log(`Opening item sheet: ID=${itemId}, Pack=${pack}`);
+        if (pack) {
+            game.packs.get(pack)?.getDocument(itemId).then(item => {
+                if (item) {
+                    console.log(`Found compendium item: ${item.name}`);
+                    item.sheet.render(true);
+                } else {
+                    console.warn(`Item ${itemId} not found in pack ${pack}`);
+                }
+            });
+        } else {
+            const item = game.items.get(itemId);
+            if (item) {
+                console.log(`Found world item: ${item.name}`);
+                item.sheet.render(true);
+            } else {
+                console.warn(`Item ${itemId} not found in world items`);
+            }
+        }
+    }
 
+    showCompendiumSelection() {
+        const packs = game.packs.contents.filter(p => p.metadata.type === "Item");
+        const folders = game.folders.filter(f => f.type === "Item" && f.contents.length > 0);
+        const tables = game.tables.contents;
+    
+        let content = `<div style="max-height: 400px; overflow-y: auto;">`;
+        content += `<h3>Compendiums</h3>`;
+        content += packs.map(pack => {
+            let checked = this.selectedCompendiums.includes(pack.collection) ? "checked" : "";
+            return `<label style="display: inline-flex; align-items: center; gap: 6px;"><input type="checkbox" name="compendium" value="${pack.collection}" ${checked}> ${pack.metadata.label}</label><br>`;
+        }).join("");
+        content += `<h3>Folders</h3>`;
+        content += folders.map(folder => {
+            let checked = this.selectedFolders.includes(folder.id) ? "checked" : "";
+            return `<label style="display: inline-flex; align-items: center; gap: 6px;"><input type="checkbox" name="folder" value="${folder.id}" ${checked}> ${folder.name}</label><br>`;
+        }).join("");
+        content += `<h3>Roll Tables</h3>`;
+        content += tables.map(table => {
+            let checked = this.selectedTables.includes(table.id) ? "checked" : "";
+            return `<label style="display: inline-flex; align-items: center; gap: 6px;"><input type="checkbox" name="table" value="${table.id}" ${checked}> ${table.name}</label><br>`;
+        }).join("");
+        content += `</div>`;
+    
+        new Dialog({
+            title: "Manage Loot Sources",
+            content: content,
+            buttons: {
+                save: {
+                    icon: '<i class="fas fa-save"></i>',
+                    label: "Save",
+                    callback: (html) => {
+                        this.selectedCompendiums = html.find("input[name='compendium']:checked").map((_, el) => el.value).get();
+                        this.selectedFolders = html.find("input[name='folder']:checked").map((_, el) => el.value).get();
+                        this.selectedTables = html.find("input[name='table']:checked").map((_, el) => el.value).get();
+                        game.settings.set(this.moduleName, "selectedCompendiums", this.selectedCompendiums.join(","));
+                        game.settings.set(this.moduleName, "selectedFolders", this.selectedFolders);
+                        game.settings.set(this.moduleName, "lootTables", this.selectedTables);
+                        console.log("Default loot sources updated:", { compendiums: this.selectedCompendiums, folders: this.selectedFolders, tables: this.selectedTables });
+                    }
+                },
+                cancel: { 
+                    icon: '<i class="fas fa-times"></i>',
+                    label: "Cancel" }
+            }
+        }).render(true);
+    }
+}
+
+Hooks.once("init", () => {
+    console.log("🔄 Random Loot Generator: INIT HOOK STARTED!");
+
+    game.settings.register("random-loot-generator", "enableLootPreview", {
+        name: "Enable Loot Preview",
+        hint: "If enabled, a preview window appears with options that let you accept or reroll the items.",
+        scope: "world",
+        config: true,
+        type: Boolean,
+        default: true,
+        onChange: value => {
+            if (game.lootGenerator) {
+                game.lootGenerator.lootPreviewEnabled = value;
+                console.log(`Loot Preview setting updated: ${value}`);
+            }
+        }
+    });
+
+    game.settings.register("random-loot-generator", "enableAutoLoot", {
+        name: "Enable Auto-Loot on Token Drop",
+        hint: "If enabled, random loot will automatically be assigned to NPC tokens when they are dragged onto the canvas.",
+        scope: "world",
+        config: true,
+        type: Boolean,
+        default: false,
+        onChange: value => console.log(`Auto-Loot setting updated: ${value}`)
+    });
+
+    game.settings.register("random-loot-generator", "randomQuantityFormula", {
+        name: "Random Item Quantity",
+        hint: "Enter a dice formula (such as 1d4 or 1d3+12) or a static number (e.g., 5) to determine the default number of items generated.",
+        scope: "world",
+        config: true,
+        type: String,
+        default: "1d4",
+        onChange: value => console.log(`Random Quantity Formula updated: ${value}`)
+    });
+
+    game.settings.register("random-loot-generator", "maxRarity", {
+        name: "Maximum Loot Rarity",
+        hint: "Choose the default maximum level of rarity that you want to generate. Choose a lower rarity for lower CR games and low-magic worlds.",
+        scope: "world",
+        config: true,
+        type: String,
+        choices: { "Common": "Common", "Uncommon": "Uncommon", "Rare": "Rare", "Very Rare": "Very Rare", "Legendary": "Legendary" },
+        default: "Legendary",
+        onChange: value => console.log(`Max Rarity setting updated: ${value}`)
+    });
+
+    game.settings.register("random-loot-generator", "selectedCompendiums", {
+        name: "Select Loot Sources",
+        hint: "Choose which default sources to pull loot from (compendiums, folders, or roll tables).",
+        scope: "world",
+        config: true,
+        type: String,
+        default: "dnd5e.tradegoods",
+        onChange: value => {
+            if (game.lootGenerator && game.packs) {
+                game.lootGenerator.selectedCompendiums = typeof value === "string" ? value.split(",").map(comp => comp.trim()).filter(comp => comp && game.packs.has(comp)) : ["dnd5e.tradegoods"];
+                console.log(`Compendium selection updated: ${game.lootGenerator.selectedCompendiums}`);
+            }
+        }
+    });
+
+    game.settings.register("random-loot-generator", "useCRBasedCurrency", {
+        name: "Use CR-Based Currency",
+        hint: "Scale the currency by creature Challenge Rating (CR) instead of using a fixed formula.",
+        scope: "world",
+        config: true,
+        type: Boolean,
+        default: false,
+        onChange: value => console.log(`CR-Based Currency setting updated: ${value}`)
+    });
+
+    game.settings.register("random-loot-generator", "defaultCurrencyChance", {
+        name: "Default Currency Chance",
+        hint: "Set the global percentage chance for creatures to carry currency (0-100%), overridden by creature type settings.",
+        scope: "world",
+        config: true,
+        type: Number,
+        range: { min: 0, max: 100, step: 1 },
+        default: 75,
+        onChange: value => console.log(`Default Currency Chance updated: ${value}%`)
+    });
+
+    game.settings.register("random-loot-generator", "currencyFormula", {
+        name: "Currency Formula",
+        hint: "Set a custom dice formula for generating currency (e.g., '1d10' for gold base amount). This feature is off if you use the CR-based currency option.",
+        scope: "world",
+        config: true,
+        type: String,
+        default: "1d10",
+        onChange: value => console.log(`Currency Formula updated: ${value}`)
+    });
+
+    game.settings.register("random-loot-generator", "selectedFolders", {
+        name: "Default Loot Folders",
+        hint: "Choose world folders to pull items from.",
+        scope: "world",
+        config: false,
+        type: Array,
+        default: []
+    });
+
+    game.settings.register("random-loot-generator", "creatureTypeLoot", {
+        name: "Creature Type Loot",
+        hint: "Assign specific loot compendiums and folders to different creature types.",
+        scope: "world",
+        config: false,
+        type: Object,
+        default: {}
+    });
+
+    game.settings.registerMenu("random-loot-generator", "creatureTypeLootMenu", {
+        name: "Manage Creature Type Loot",
+        label: "Configure",
+        hint: "Override the default settings by selecting different compendiums and folders for different creature types.",
+        icon: "fas fa-dragon",
+        type: CreatureTypeLootForm,
+        restricted: true
+    });
+
+    game.settings.register("random-loot-generator", "rarityPercentages", {
+        name: "Rarity Percentages",
+        hint: "Percentage distribution for item rarities.",
+        scope: "world",
+        config: false,
+        type: Object,
+        default: {
+            "Common": 50,
+            "Uncommon": 30,
+            "Rare": 15,
+            "Very Rare": 4,
+            "Legendary": 1
+        }
+    });
+
+    game.settings.registerMenu("random-loot-generator", "rarityPercentagesMenu", {
+        name: "Manage Rarity Percentages",
+        label: "Edit Percentages",
+        hint: "Adjust the percentage chance for each rarity level.",
+        icon: "fas fa-percentage",
+        type: RarityPercentagesForm,
+        restricted: true
+    });
+
+    game.settings.register("random-loot-generator", "lootTables", {
+        name: "Loot Tables",
+        hint: "Selected RollTables for creature type loot overrides.",
+        scope: "world",
+        config: false,
+        type: Array,
+        default: []
+    });
+
+    game.lootGenerator = new LootGenerator();
+    Hooks.once("ready", () => {
+        game.lootGenerator.loadSettings();
+        console.log("Loot Generator initialized successfully!", game.lootGenerator);
+    });
+
+    console.log("✅ INIT HOOK COMPLETED!");
+});
 
 Hooks.on("renderSettingsConfig", (app, html, data) => {
     if (!game.user.isGM) return;
@@ -755,34 +734,24 @@ Hooks.on("renderSettingsConfig", (app, html, data) => {
         }
     });
 
-    // Compendium button
     let settingElement = html.find(`[name="random-loot-generator.selectedCompendiums"]`).parent();
     settingElement.find("input").remove();
-    let button = $(`<button type="button" style="padding: 8px 12px; font-size: 14px; line-height: 1.5; height: auto; display: inline-block; vertical-align: middle; white-space: nowrap; border: 1px solid #999; border-radius: 2px; cursor: pointer;"><i class="fas fa-book"></i> Manage Loot Sources</button>`);    button.on("click", () => game.lootGenerator.showCompendiumSelection());
+    let button = $(`<button type="button" style="padding: 8px 12px; font-size: 14px; line-height: 1.5; height: auto; display: inline-block; vertical-align: middle; white-space: nowrap; border: 1px solid #999; border-radius: 2px; cursor: pointer;"><i class="fas fa-book"></i> Manage Loot Sources</button>`);
+    button.on("click", () => game.lootGenerator.showCompendiumSelection());
     settingElement.append(button);
 
-    // Disable/enable Currency Formula based on Use CR-Based Currency
     const crBasedCheckbox = html.find(`[name="random-loot-generator.useCRBasedCurrency"]`);
     const currencyFormulaInput = html.find(`[name="random-loot-generator.currencyFormula"]`);
 
     const toggleCurrencyFormula = () => {
         const isCRBased = crBasedCheckbox.prop("checked");
         currencyFormulaInput.prop("disabled", isCRBased);
-        if (isCRBased) {
-            currencyFormulaInput.css("opacity", "0.5"); // Dim when disabled
-        } else {
-            currencyFormulaInput.css("opacity", "1"); // Full opacity when enabled
-        }
+        currencyFormulaInput.css("opacity", isCRBased ? "0.5" : "1");
     };
 
-    // Initial state
     toggleCurrencyFormula();
-
-    // Update on change
     crBasedCheckbox.on("change", toggleCurrencyFormula);
 });
-
-
 
 Hooks.on("getSceneControlButtons", (controls) => {
     let tokenControls = controls.find(control => control.name === "token");
@@ -811,8 +780,69 @@ Hooks.on("createToken", async (tokenDoc) => {
     await game.lootGenerator.generateLootForTokens([tokenDoc.object]);
 });
 
+Hooks.on("renderTokenConfig", (app, html, data) => {
+    if (!game.user.isGM) return;
 
+    const actor = app.object.actor;
+    // Initialize flag if undefined
+    const customLootEnabled = actor.getFlag("random-loot-generator", "customLootEnabled") ?? false;
+    console.log(`TokenConfig render: Initial customLootEnabled for ${actor.name}: ${customLootEnabled}`);
 
+    const lootSection = $(`
+        <fieldset style="margin: 10px 0; padding: 10px; border: 1px solid #999; border-radius: 5px;">
+            <legend>Random Loot Generator</legend>
+            <div class="form-group">
+                <label>Enable Custom Loot Settings</label>
+                <input type="checkbox" name="flags.random-loot-generator.customLootEnabled" ${customLootEnabled ? "checked" : ""}>
+                <button type="button" class="configure-loot" style="margin-left: 10px; padding: 4px 8px; border: 1px solid #999; border-radius: 5px; background-color: #333; color: white; opacity: ${customLootEnabled ? "1" : "0.5"}; cursor: ${customLootEnabled ? "pointer" : "not-allowed"};" ${customLootEnabled ? "" : "disabled"}>Configure Loot</button>
+            </div>
+        </fieldset>
+    `);
+
+    html.find(".tab[data-tab='character']").append(lootSection);
+
+    const toggleButton = () => {
+        const isChecked = lootSection.find("input[name='flags.random-loot-generator.customLootEnabled']").prop("checked");
+        lootSection.find(".configure-loot").prop("disabled", !isChecked).css({
+            "cursor": isChecked ? "pointer" : "not-allowed",
+            "opacity": isChecked ? "1" : "0.5"
+        });
+    };
+
+    // Update flag immediately on checkbox change
+    lootSection.find("input[name='flags.random-loot-generator.customLootEnabled']").on("change", async () => {
+        const isChecked = lootSection.find("input[name='flags.random-loot-generator.customLootEnabled']").prop("checked");
+        await actor.setFlag("random-loot-generator", "customLootEnabled", isChecked);
+        console.log(`Checkbox changed for ${actor.name}: customLootEnabled set to ${isChecked}`);
+        toggleButton();
+    });
+
+    lootSection.find(".configure-loot").on("click", async () => {
+        const creatureType = actor.system?.details?.type?.value || "humanoid";
+        const form = new TokenLootSettingsForm(actor, creatureType);
+        form.render(true);
+        // Update checkbox state on form close
+        form._onClose = async function() {
+            const isCustomEnabled = await actor.getFlag("random-loot-generator", "customLootEnabled") || false;
+            lootSection.find("input[name='flags.random-loot-generator.customLootEnabled']").prop("checked", isCustomEnabled);
+            toggleButton();
+            console.log(`TokenLootSettingsForm closed for ${actor.name}: customLootEnabled is ${isCustomEnabled}`);
+            await FormApplication.prototype._onClose.call(this);
+        };
+    });
+
+    // Override form submission to ensure flag is saved
+    const originalSubmit = app._onSubmit.bind(app);
+    app._onSubmit = async function(event, options) {
+        event.preventDefault();
+        const formData = new FormDataExtended(this.form);
+        const data = formData.object;
+        const customLootEnabled = data["flags.random-loot-generator.customLootEnabled"] === "on" || data["flags.random-loot-generator.customLootEnabled"] === true;
+        await this.object.actor.setFlag("random-loot-generator", "customLootEnabled", customLootEnabled);
+        console.log(`TokenConfig submit for ${actor.name}: customLootEnabled set to ${customLootEnabled}`);
+        return originalSubmit(event, options);
+    };
+});
 
 class CreatureTypeLootForm extends FormApplication {
     static get defaultOptions() {
@@ -1148,6 +1178,225 @@ class CreatureTypeLootForm extends FormApplication {
     }
 }
 
+class TokenLootSettingsForm extends FormApplication {
+    constructor(actor, creatureType) {
+        super();
+        this.actor = actor;
+        this.creatureType = creatureType;
+    }
+
+    static get defaultOptions() {
+        return foundry.utils.mergeObject(super.defaultOptions, {
+            width: 600,
+            height: "auto",
+            resizable: true,
+            classes: ["token-loot-settings-window"],
+            title: "Configure Token Loot Settings",
+            template: "modules/random-loot-generator/tokenLootSettings.html"
+        });
+    }
+
+    async getData() {
+        const lootSettings = (await this.actor.getFlag("random-loot-generator", "lootSettings")) || {};
+        const creatureLootSettings = game.settings.get("random-loot-generator", "creatureTypeLoot") || {};
+        const typeSettings = creatureLootSettings[this.creatureType] || {};
+
+        return {
+            compendiums: lootSettings.compendiums || typeSettings.compendiums || [],
+            folders: lootSettings.folders || typeSettings.folders || [],
+            tables: lootSettings.tables || typeSettings.tables || [],
+            quantityFormula: lootSettings.quantityFormula || typeSettings.quantityFormula || "",
+            maxRarity: lootSettings.maxRarity || typeSettings.maxRarity || "",
+            itemChance: lootSettings.itemChance !== null && lootSettings.itemChance !== undefined ? lootSettings.itemChance : typeSettings.itemChance !== null ? typeSettings.itemChance : "",
+            currencyChance: lootSettings.currencyChance !== null && lootSettings.currencyChance !== undefined ? lootSettings.currencyChance : typeSettings.currencyChance !== null ? typeSettings.currencyChance : "",
+            globalQuantityFormula: game.settings.get("random-loot-generator", "randomQuantityFormula") || "1d4",
+            globalMaxRarity: game.settings.get("random-loot-generator", "maxRarity") || "Legendary",
+            globalItemChance: 100,
+            globalCurrencyChance: game.settings.get("random-loot-generator", "defaultCurrencyChance") || 75,
+            totalSources: (lootSettings.compendiums?.length || 0) + (lootSettings.folders?.length || 0) + (lootSettings.tables?.length || 0)
+        };
+    }
+
+    activateListeners(html) {
+        super.activateListeners(html);
+
+        const focusNextField = (currentInput) => {
+            const inputs = Array.from(html.find("input, select, button"));
+            const currentIndex = inputs.indexOf(currentInput[0]);
+            const nextIndex = (currentIndex + 1) % inputs.length;
+            if (inputs[nextIndex]) inputs[nextIndex].focus();
+        };
+
+        html.find(".quantity-input").on("change keydown", async (event) => {
+            const newFormula = event.currentTarget.value.trim();
+            const $currentInput = $(event.currentTarget);
+
+            if (event.type === "keydown" && event.key === "Tab") {
+                event.preventDefault();
+                focusNextField($currentInput);
+                return;
+            }
+
+            if (event.type === "keydown" && event.key === "Enter") {
+                event.preventDefault();
+            } else if (event.type !== "change") {
+                return;
+            }
+
+            const quantityRegex = /^(\d+d\d+([+-]\d+)?|\d+)$/;
+            if (newFormula && !quantityRegex.test(newFormula)) {
+                ui.notifications.warn(`Invalid quantity: "${newFormula}". Use a dice formula (e.g., "1d4", "2d6+1") or a static number (e.g., "5").`);
+                return;
+            }
+
+            let settings = (await this.actor.getFlag("random-loot-generator", "lootSettings")) || {};
+            settings.quantityFormula = newFormula;
+            await this.actor.setFlag("random-loot-generator", "lootSettings", settings);
+            await this.actor.setFlag("random-loot-generator", "customLootEnabled", true);
+            console.log(`Updated token quantityFormula to: ${newFormula}`);
+            this.render();
+        });
+
+        html.find(".item-chance-input").on("change keydown", async (event) => {
+            const newChance = event.currentTarget.value.trim() === "" || parseInt(event.currentTarget.value) === 0 ? null : parseInt(event.currentTarget.value);
+            const $currentInput = $(event.currentTarget);
+
+            if (event.type === "keydown" && event.key === "Tab") {
+                event.preventDefault();
+                focusNextField($currentInput);
+                return;
+            }
+
+            if (event.type === "keydown" && event.key === "Enter") {
+                event.preventDefault();
+            } else if (event.type !== "change") {
+                return;
+            }
+
+            let settings = (await this.actor.getFlag("random-loot-generator", "lootSettings")) || {};
+            settings.itemChance = newChance;
+            await this.actor.setFlag("random-loot-generator", "lootSettings", settings);
+            await this.actor.setFlag("random-loot-generator", "customLootEnabled", true);
+            console.log(`Updated token itemChance to: ${newChance === null ? "[Global]" : newChance + "%"}`);
+            this.render();
+        });
+
+        html.find(".currency-chance-input").on("change keydown", async (event) => {
+            const newChance = event.currentTarget.value.trim() === "" || parseInt(event.currentTarget.value) === 0 ? null : parseInt(event.currentTarget.value);
+            const $currentInput = $(event.currentTarget);
+
+            if (event.type === "keydown" && event.key === "Tab") {
+                event.preventDefault();
+                focusNextField($currentInput);
+                return;
+            }
+
+            if (event.type === "keydown" && event.key === "Enter") {
+                event.preventDefault();
+            } else if (event.type !== "change") {
+                return;
+            }
+
+            let settings = (await this.actor.getFlag("random-loot-generator", "lootSettings")) || {};
+            settings.currencyChance = newChance;
+            await this.actor.setFlag("random-loot-generator", "lootSettings", settings);
+            await this.actor.setFlag("random-loot-generator", "customLootEnabled", true);
+            console.log(`Updated token currencyChance to: ${newChance === null ? "[Global]" : newChance + "%"}`);
+            this.render();
+        });
+
+        html.find(".rarity-select").on("change keydown", async (event) => {
+            const newRarity = event.currentTarget.value;
+            const $currentInput = $(event.currentTarget);
+
+            if (event.type === "keydown" && event.key === "Tab") {
+                event.preventDefault();
+                focusNextField($currentInput);
+                return;
+            }
+
+            if (event.type === "keydown" && event.key === "Enter") {
+                event.preventDefault();
+            } else if (event.type !== "change") {
+                return;
+            }
+
+            let settings = (await this.actor.getFlag("random-loot-generator", "lootSettings")) || {};
+            settings.maxRarity = newRarity;
+            await this.actor.setFlag("random-loot-generator", "lootSettings", settings);
+            await this.actor.setFlag("random-loot-generator", "customLootEnabled", true);
+            console.log(`Updated token maxRarity to: ${newRarity || "[Global]"}`);
+            this.render();
+        });
+
+        html.find(".compendium-select-btn").click(async (event) => {
+            const button = $(event.currentTarget);
+            let settings = (await this.actor.getFlag("random-loot-generator", "lootSettings")) || {};
+            let selectedCompendiums = settings.compendiums || [];
+            let selectedFolders = settings.folders || [];
+            let selectedTables = settings.tables || [];
+
+            const packs = game.packs.contents.filter(p => p.metadata.type === "Item");
+            const folders = game.folders.filter(f => f.type === "Item" && f.contents.length > 0);
+            const tables = game.tables.contents;
+
+            let content = `<div style="max-height: 400px; overflow-y: auto;">`;
+            content += `<h3>Compendiums</h3>`;
+            content += packs.map(pack => {
+                let checked = selectedCompendiums.includes(pack.collection) ? "checked" : "";
+                return `<label style="display: inline-flex; align-items: center; gap: 6px;"><input type="checkbox" name="compendium" value="${pack.collection}" ${checked} style="margin: 0;"> <span style="vertical-align: middle;">${pack.metadata.label}</span></label><br>`;
+            }).join("");
+            content += `<h3>Folders</h3>`;
+            content += folders.map(folder => {
+                let checked = selectedFolders.includes(folder.id) ? "checked" : "";
+                return `<label style="display: inline-flex; align-items: center; gap: 6px;"><input type="checkbox" name="folder" value="${folder.id}" ${checked} style="margin: 0;"> <span style="vertical-align: middle;">${folder.name}</span></label><br>`;
+            }).join("");
+            content += `<h3>Roll Tables</h3>`;
+            content += tables.map(table => {
+                let checked = selectedTables.includes(table.id) ? "checked" : "";
+                return `<label style="display: inline-flex; align-items: center; gap: 6px;"><input type="checkbox" name="table" value="${table.id}" ${checked} style="margin: 0;"> <span style="vertical-align: middle;">${table.name}</span></label><br>`;
+            }).join("");
+            content += `</div>`;
+
+            const dialogResult = await new Promise(resolve => {
+                new Dialog({
+                    title: `Select Loot Sources for ${this.actor.name}`,
+                    content: content,
+                    buttons: {
+                        save: {
+                            icon: '<i class="fas fa-save"></i>',
+                            label: "Save",
+                            callback: (html) => {
+                                const selectedComps = html.find("input[name='compendium']:checked").map((_, el) => el.value).get();
+                                const selectedFolds = html.find("input[name='folder']:checked").map((_, el) => el.value).get();
+                                const selectedTabs = html.find("input[name='table']:checked").map((_, el) => el.value).get();
+                                resolve({ compendiums: selectedComps, folders: selectedFolds, tables: selectedTabs });
+                            }
+                        },
+                        cancel: { 
+                            icon: '<i class="fas fa-ban"></i>',
+                            label: "Cancel", 
+                            callback: () => resolve(null) 
+                        }
+                    },
+                    default: "save",
+                    close: () => resolve(null)
+                }).render(true);
+            });
+
+            if (dialogResult !== null) {
+                settings.compendiums = dialogResult.compendiums;
+                settings.folders = dialogResult.folders;
+                settings.tables = dialogResult.tables;
+                await this.actor.setFlag("random-loot-generator", "lootSettings", settings);
+                await this.actor.setFlag("random-loot-generator", "customLootEnabled", true);
+                console.log(`Updated token loot sources:`, settings);
+                this.render();
+            }
+        });
+    }
+}
+
 class RarityPercentagesForm extends FormApplication {
     static get defaultOptions() {
         return foundry.utils.mergeObject(super.defaultOptions, {
@@ -1158,12 +1407,7 @@ class RarityPercentagesForm extends FormApplication {
             title: "Manage Rarity Percentages",
             template: "modules/random-loot-generator/rarityPercentages.html"
         });
-
-        
     }
-
-
-
 
     getData() {
         let percentages = game.settings.get("random-loot-generator", "rarityPercentages") || {
@@ -1209,6 +1453,6 @@ class RarityPercentagesForm extends FormApplication {
     }
 
     async _updateObject(event, formData) {
-        // Handled by _onSave, no additional logic needed here
+        // Handled by _onSave
     }
 }
