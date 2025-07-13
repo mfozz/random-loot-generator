@@ -52,7 +52,9 @@ The way you use this module depends on your DM style:
 - **Global Currency Controls:** Add coins by CR or fixed formulas, with an adjustable percent chance for currency.  
 - **Creature Type Overrides:** Customize sources, quantities, and chances for each creature type individually.
 - **(NEW)Token-Specific Overrides:** Customize the settings at the token level through token settings. 
-- **Export/Import:** Save and load source settings (defaults + overrides) as JSON files.  
+- **Export/Import:** Save and load source settings (defaults + overrides) as JSON files.
+- **Keyboard Shortcut** Press the "L" key to trigger loot generation, and remap the key in Configure Controls.
+
 
 
 **Additional Development Notes (FAQ)**
