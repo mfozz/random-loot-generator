@@ -2,11 +2,11 @@
   "id": "random-loot-generator",
   "title": "Random Loot Generator",
   "description": "Automatically generates loot for selected NPCs",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "author": "Malefactory Games",
   "esmodules": ["loot-generator.js"],
   "manifest": "https://github.com/mfozz/random-loot-generator/releases/latest/download/module.json",
-  "download": "https://github.com/mfozz/random-loot-generator/releases/download/2.0.1/module.zip",
+  "download": "https://github.com/mfozz/random-loot-generator/releases/download/2.1.0/module.zip",
   "compatibility": {
     "minimum": "13",
     "verified": "13"

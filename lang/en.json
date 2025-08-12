@@ -17,7 +17,7 @@
   "RLG.UseCRBasedCurrency.Name": "Use CR-Based Currency",
   "RLG.UseCRBasedCurrency.Hint": "Scale the currency by creature Challenge Rating (CR) instead of using a fixed formula.",
   "RLG.DefaultCurrencyChance.Name": "Default Currency Chance",
-  "RLG.DefaultCurrencyChance.Hint": "Set the global percentage chance for creatures to carry currency (0-100%), overridden by creature type settings.",
+  "RLG.DefaultCurrencyChance.Hint": "Set the global percentage chance for creatures to get extra currency (0-100%).",
   "RLG.CurrencyFormula.Name": "Currency Formula",
   "RLG.CurrencyFormula.Hint": "Set a custom dice formula for generating currency (e.g., '1d10' for gold base amount). This feature is off if you use the CR-based currency option.",
   "RLG.SelectedFolders.Name": "Default Loot Folders",
@@ -36,6 +36,7 @@
   "RLG.RarityPercentagesMenu.Hint": "Adjust the percentage chance for each rarity level.",
   "RLG.RarityPercentages.Saved": "Rarity percentages saved!",
   "RLG.RarityPercentages.Restored": "Rarity percentages restored to defaults!",
+  "RLG.RarityPercentages.Title": "Rarity Percentages",
   "RLG.GenerateLoot.Title": "Generate Random Loot",
   "RLG.LootPreview.Title": "Loot Preview",
   "RLG.LootPreview.Reroll": "Re-Roll",
@@ -49,6 +50,7 @@
   "RLG.TokenLootSettings.TitleFor": "Select Loot Sources for {name}",
   "RLG.CompendiumSelection.Compendiums": "Compendiums",
   "RLG.CompendiumSelection.Folders": "Folders",
+  "RLG.CompendiumSelection.TitleFor": "Select Sources for {creatureType}",
   "RLG.CompendiumSelection.RollTables": "Roll Tables",
   "RLG.CompendiumSelection.NoCompendiums": "No Item compendiums available.",
   "RLG.CompendiumSelection.NoFolders": "No Item folders with content available.",
@@ -75,5 +77,11 @@
   "RLG.Settings.CurrencySettings": "Currency Settings",
   "RLG.TokenConfig.Legend": "Random Loot Generator",
   "RLG.TokenConfig.EnableCustomLoot": "Enable Custom Loot Settings",
-  "RLG.TokenConfig.ConfigureLoot": "Configure Loot"
+  "RLG.TokenConfig.ConfigureLoot": "Configure Loot",
+  "RLG.DebugLogging.Name": "Enable Debug Logging",
+  "RLG.DebugLogging.Hint": "Show extended console output for troubleshooting.",
+  "RLG.Notification.NoValidItemsFromTables": "RLG: No valid items generated from selected sources; they might be empty or broken.",
+  "RLG.NoItemsFound": "No items found",
+  "RLG.Warn.NoSourcesSelected": "No loot sources selected. Generation will fall back or produce no items."
+
 }
