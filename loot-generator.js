@@ -181,7 +181,6 @@ for (const label of labels) {
 }
 
 
-// === End Helpers ===
 
 
 
@@ -304,7 +303,8 @@ if (rawCompendiums === undefined) {
       }}
 
     async generateLootForTokens(tokens) {
-        console.log("generateLootForTokens called with tokens:", tokens);
+      if (!game.user.isGM) return; // Defensive: only GM executes loot generation  
+      console.log("generateLootForTokens called with tokens:", tokens);
         if (!tokens.length) {
             ui.notifications.warn(game.i18n.localize("RLG.Notification.NoTokensSelected"));
             return;
@@ -476,8 +476,7 @@ async function pickFromTable(tableId) {
 
     if (!item) return null;
 
-    // (Optional) enforce rarity, otherwise just accept the roll
-    // if (!rarityAllowed(item.system?.rarity)) return null;
+
 
     const itemData = item.toObject();
     itemData._id = item.id;
@@ -641,43 +640,39 @@ if (itemRoll <= itemChance) {
     }
   }
 
-  async function getItemFromTable(table) {
-    try {
-      for (let i = 0; i < TABLE_REROLL_MAX; i++) {
-        const rollResult = await table.roll();
-        const results = rollResult?.results ?? [];
-        for (const result of results) {
-          // Only accept resolvable document results
-          const id = result.documentId ?? result.resultId;
-          const collection = result.documentCollection ?? result.collection;
+async function getItemFromTable(table) {
+  try {
+    const rollResult = await table.roll();
+    const results = rollResult?.results ?? [];
 
-          let doc = null;
-          if (!id) continue;
+    for (const result of results) {
+      // Minimal legacy-safe extraction; swap to result.uuid later if you like
+      const id = result.documentId ?? result.resultId;
+      const collection = result.documentCollection ?? result.collection;
+      if (!id) continue;
 
-          if (collection === "Item") {
-            // World item
-            doc = game.items.get(id) ?? null;
-          } else if (collection && typeof collection === "string") {
-            doc = await game.packs.get(collection)?.getDocument(id);
-          }
+      let doc = null;
+      if (collection === "Item") doc = game.items.get(id) ?? null;
+      else if (collection && typeof collection === "string") doc = await game.packs.get(collection)?.getDocument(id);
+      if (!doc) continue;
 
-          if (!doc) continue;
-          const rar = normalizeRarity(doc.system?.rarity);
-          if (!rarityAllowed(rar)) continue;
+      const rar = normalizeRarity(doc.system?.rarity);
+      if (!rarityAllowed(rar)) continue;
 
-          const data = doc.toObject();
-          data._id = doc.id;
-          data.pack = doc.pack || collection || "";
-          return data;
-        }
-        // if we got here, that roll didn't yield a usable item; try another reroll
-      }
-      return null;
-    } catch (e) {
-      rlgDebug("Table pick failed", table?.name, e);
-      return null;
+      const data = doc.toObject();
+      data._id = doc.id;
+      data.pack = doc.pack || collection || "";
+      return data;
     }
+
+    // Single roll produced no item -> respect the table’s odds
+    return null;
+  } catch (e) {
+    rlgDebug("Table pick failed", table?.name, e);
+    return null;
   }
+}
+
 
   // If no sources at all, skip items (currency still handled after)
   if (!allSources.length) {
@@ -686,14 +681,18 @@ if (itemRoll <= itemChance) {
     // Per-slot selection: randomize source order and try each until we get one
     for (let i = 0; i < quantity; i++) {
       const shuffled = fisherYates(allSources.slice());
-      let picked = null;
+let picked = null;
+for (const src of shuffled) {
+  if (src.kind === "pack")        { picked = await getItemFromPack(src.pack); }
+  else if (src.kind === "folder") { picked = await getItemFromFolder(src.folder); }
+  else if (src.kind === "table")  { picked = await getItemFromTable(src.table); }
 
-      for (const src of shuffled) {
-        if (src.kind === "pack")   { picked = await getItemFromPack(src.pack); }
-        else if (src.kind === "folder") { picked = await getItemFromFolder(src.folder); }
-        else if (src.kind === "table")  { picked = await getItemFromTable(src.table); }
-        if (picked) break; // got one for this slot
-      }
+  if (picked) break;
+
+  // NEW: if a table yielded nothing, honor that and stop for this slot
+  if (!picked && src.kind === "table") break;
+}
+
 
       if (picked) {
         lootItems.push(picked);
@@ -823,7 +822,8 @@ const raritySummary = itemCount > 0
     }
 
     showLootPreview(lootAssignments, tokens) {
-        let content = `
+      if (!game.user.isGM) return; // Never show loot preview to players  
+      let content = `
             <style>
                 .loot-item { display: flex; align-items: center; gap: 10px; }
                 .loot-img { width: 30px; height: 30px; border-radius: 5px; }
@@ -1972,7 +1972,8 @@ Hooks.on("renderSettingsConfig", (app, html, data) => {
 });
 
 Hooks.on("createToken", async (tokenDoc) => {
-    if (!game.settings.get("random-loot-generator", "enableAutoLoot")) return;
+  if (!game.user.isGM) return; // Only the GM should auto-loot on creation  
+  if (!game.settings.get("random-loot-generator", "enableAutoLoot")) return;
     if (!tokenDoc.actor || tokenDoc.actor.type !== "npc") return;
     console.log(`Auto-Loot triggered for ${tokenDoc.name}`);
     if (game?.lootGenerator?.generateLootForTokens) {
