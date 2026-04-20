@@ -9,7 +9,8 @@
   "download": "https://github.com/mfozz/random-loot-generator/releases/download/2.1.1/module.zip",
   "compatibility": {
     "minimum": "13",
-    "verified": "13"
+    "verified": "14",
+    "maximum": "14"
   },
   "languages": [
     {

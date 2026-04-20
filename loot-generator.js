@@ -2057,24 +2057,31 @@ Hooks.on("renderTokenConfig", (app, html, data) => {
     });
 });
 
-Hooks.on('renderDialog', async (app, html, data) => {
+async function rlgOnRenderDialog(app, html, data) {
   if (!game.user.isGM) return;
+  const $html = $(html);
+  const rootEl = $html[0];
   const title = app.title;
   const expectedTitles = [
     game.i18n.localize("RLG.ManageLootSources.Title"),
     game.i18n.format("RLG.CompendiumSelection.TitleFor", { creatureType: /.*/ }),
     game.i18n.format("RLG.TokenLootSettings.TitleFor", { name: /.*/ })
   ];
-  const isTargetDialog = expectedTitles.some(expected => 
+  const isTargetDialog = expectedTitles.some(expected =>
     typeof expected === 'string' ? title === expected : title.match(expected)
   );
   if (isTargetDialog) {
     rlgDebug(`Decorating dialog: ${title}`);
-    rlgDebug(`Dialog HTML (first 200 chars): ${html[0].outerHTML.substring(0, 200)}...`);
-    await rlgDecorateSourceDialog(app, html);
-    const disabledLabels = html.find('label.rlg-source--disabled');
+    rlgDebug(`Dialog HTML (first 200 chars): ${(rootEl?.outerHTML ?? '').substring(0, 200)}...`);
+    await rlgDecorateSourceDialog(app, $html);
+    const disabledLabels = $html.find('label.rlg-source--disabled');
     rlgDebug(`Found ${disabledLabels.length} disabled labels in ${title}`);
   } else {
     rlgDebug(`Skipping dialog: ${title} (not a target dialog)`);
   }
-});
+}
+
+// Register for both the V1 jQuery hook (`renderDialog`) and the v13+ HTMLElement hook
+// (`renderDialogV2`/`renderDialogHTML`) so the decorator keeps working across Foundry versions.
+Hooks.on('renderDialog', rlgOnRenderDialog);
+Hooks.on('renderDialogV2', rlgOnRenderDialog);
