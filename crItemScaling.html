@@ -1,0 +1,295 @@
+<style>
+    .cr-item-scaling-window {
+        min-width: 760px;
+        max-height: calc(100vh - 80px);
+        display: flex;
+        flex-direction: column;
+    }
+
+    .cr-item-scaling-window .window-content {
+        max-height: calc(100vh - 120px);
+        overflow-y: auto;
+        min-height: 0;
+    }
+
+    .cr-item-scaling-form {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding: 10px;
+        box-sizing: border-box;
+    }
+
+    .cr-item-scaling-form h3 {
+        margin: 8px 0 0;
+        border-bottom: 1px solid #999;
+        padding-bottom: 4px;
+    }
+
+    .cr-section-note {
+        margin: -6px 0 0;
+        color: #666;
+        font-size: 13px;
+        font-style: italic;
+    }
+
+    .cr-scaling-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: bold;
+        width: fit-content;
+    }
+
+    .cr-item-scaling-form .cr-scaling-toggle input[type="checkbox"] {
+        width: auto;
+        flex: 0 0 auto;
+    }
+
+    .cr-scaling-status {
+        padding: 8px 10px;
+        border: 1px solid #999;
+        border-radius: 5px;
+        font-weight: bold;
+    }
+
+    .cr-scaling-status.enabled {
+        background-color: #145c32;
+        color: white;
+    }
+
+    .cr-scaling-status.disabled {
+        background-color: #5c4a14;
+        color: white;
+    }
+
+    .cr-fallback-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(120px, 1fr));
+        gap: 8px;
+    }
+
+    .cr-field {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    .cr-field label {
+        font-weight: bold;
+    }
+
+    .cr-item-scaling-form input,
+    .cr-item-scaling-form select {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 4px;
+        border-radius: 5px;
+        background-color: #333;
+        color: white;
+        border: 1px solid #999;
+    }
+
+    .cr-band-table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+
+    .cr-band-table th,
+    .cr-band-table td {
+        padding: 4px;
+        text-align: left;
+        vertical-align: middle;
+    }
+
+    .cr-band-table th {
+        border-bottom: 1px solid #999;
+    }
+
+    .cr-band-table .cr-range {
+        width: 90px;
+        font-weight: bold;
+    }
+
+    .creature-cr-block {
+        border-top: 1px solid #999;
+        padding-top: 10px;
+    }
+
+    .creature-cr-header {
+        display: grid;
+        grid-template-columns: 28px 160px 1fr;
+        gap: 8px;
+        align-items: center;
+        margin-bottom: 6px;
+    }
+
+    .creature-cr-toggle {
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        border: 1px solid #999;
+        border-radius: 5px;
+        background-color: #333;
+        color: white;
+        cursor: pointer;
+        line-height: 1;
+    }
+
+    .creature-cr-toggle i {
+        pointer-events: none;
+    }
+
+    .creature-cr-block.collapsed .creature-cr-body {
+        display: none;
+    }
+
+    .creature-cr-label {
+        opacity: 0.72;
+        font-weight: normal;
+    }
+
+    .creature-cr-label.custom {
+        opacity: 1;
+        color: inherit;
+        font-weight: bold;
+    }
+
+    .creature-cr-label .creature-cr-check {
+        display: none;
+        margin-left: 4px;
+    }
+
+    .creature-cr-label.custom .creature-cr-check {
+        display: inline-block;
+    }
+
+    .cr-actions {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+        margin-top: 4px;
+    }
+
+    .cr-actions button {
+        padding: 4px 10px;
+        border: 1px solid #999;
+        border-radius: 5px;
+        background-color: #333;
+        color: white;
+        cursor: pointer;
+    }
+</style>
+
+<form class="cr-item-scaling-form" autocomplete="off">
+    <div class="cr-actions">
+        <button type="button" class="export-cr-settings"><i class="fas fa-download"></i> Export CR Settings</button>
+        <button type="button" class="import-cr-settings"><i class="fas fa-upload"></i> Import CR Settings</button>
+        <button type="button" class="restore-defaults"><i class="fas fa-repeat"></i> Restore Defaults</button>
+    </div>
+
+    <label class="cr-scaling-toggle">
+        <input type="checkbox" name="enabled" {{#if enabled}}checked{{/if}}>
+        Enable CR-Based Item Scaling for loot generation
+    </label>
+
+    <div class="cr-scaling-status {{#if enabled}}enabled{{else}}disabled{{/if}}">
+        {{#if enabled}}
+        CR-Based Item Scaling is enabled. CR bands can override quantity, item chance, and max rarity.
+        {{else}}
+        CR-Based Item Scaling is disabled. Saved CR band settings will not affect loot until enabled.
+        {{/if}}
+    </div>
+
+    <h3>Global Fallbacks</h3>
+    <div class="cr-fallback-grid">
+        <div class="cr-field">
+            <label>Quantity Formula</label>
+            <input type="text" name="fallback.quantityFormula" value="{{fallback.quantityFormula}}">
+        </div>
+        <div class="cr-field">
+            <label>Item Chance</label>
+            <input type="number" name="fallback.itemChance" value="{{fallback.itemChance}}" min="0" max="100">
+        </div>
+        <div class="cr-field">
+            <label>Max Rarity</label>
+            <select name="fallback.maxRarity">
+                {{#each rarityLevels}}
+                <option value="{{this}}" {{#if (eq ../fallback.maxRarity this)}}selected{{/if}}>{{this}}</option>
+                {{/each}}
+            </select>
+        </div>
+    </div>
+
+    <h3>Global CR Bands</h3>
+    <p class="cr-section-note">Enter values to override the global settings; empty fields are ignored.</p>
+    <table class="cr-band-table">
+        <thead>
+            <tr>
+                <th>CR Range</th>
+                <th>Quantity Formula</th>
+                <th>Item Chance</th>
+                <th>Max Rarity</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{#each bands}}
+            <tr>
+                <td class="cr-range">{{label}}</td>
+                <td><input type="text" data-scope="global" data-band="{{id}}" data-field="quantityFormula" value="{{quantityFormula}}" placeholder="[Fallback]"></td>
+                <td><input type="number" data-scope="global" data-band="{{id}}" data-field="itemChance" value="{{itemChance}}" min="0" max="100" placeholder="[Fallback]"></td>
+                <td>
+                    <select data-scope="global" data-band="{{id}}" data-field="maxRarity">
+                        <option value="">[Fallback]</option>
+                        {{#each ../rarityLevels}}
+                        <option value="{{this}}" {{#if (eq ../maxRarity this)}}selected{{/if}}>{{this}}</option>
+                        {{/each}}
+                    </select>
+                </td>
+            </tr>
+            {{/each}}
+        </tbody>
+    </table>
+
+    <h3>Creature Type Overrides</h3>
+    <p class="cr-section-note">Enter values to override the global settings; empty fields are ignored.</p>
+    {{#each creatureTypes}}
+    <div class="creature-cr-block {{#unless expanded}}collapsed{{/unless}}" data-creature="{{key}}">
+        <div class="creature-cr-header">
+            <button type="button" class="creature-cr-toggle" title="Toggle {{label}}" aria-expanded="{{#if expanded}}true{{else}}false{{/if}}">
+                <i class="fas {{#if expanded}}fa-chevron-down{{else}}fa-chevron-right{{/if}}"></i>
+            </button>
+            <strong class="creature-cr-label {{#if hasOverrides}}custom{{/if}}">
+                {{label}} <i class="fas fa-check creature-cr-check"></i>
+            </strong>
+        </div>
+        <table class="cr-band-table creature-cr-body">
+            <thead>
+                <tr>
+                    <th>CR Range</th>
+                    <th>Quantity Formula</th>
+                    <th>Item Chance</th>
+                    <th>Max Rarity</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{#each bands}}
+                <tr>
+                    <td class="cr-range">{{label}}</td>
+                    <td><input type="text" data-scope="creature" data-creature="{{../key}}" data-band="{{id}}" data-field="quantityFormula" value="{{quantityFormula}}" placeholder="[Global]"></td>
+                    <td><input type="number" data-scope="creature" data-creature="{{../key}}" data-band="{{id}}" data-field="itemChance" value="{{itemChance}}" min="0" max="100" placeholder="[Global]"></td>
+                    <td>
+                        <select data-scope="creature" data-creature="{{../key}}" data-band="{{id}}" data-field="maxRarity">
+                            <option value="">[Global]</option>
+                            {{#each ../../rarityLevels}}
+                            <option value="{{this}}" {{#if (eq ../maxRarity this)}}selected{{/if}}>{{this}}</option>
+                            {{/each}}
+                        </select>
+                    </td>
+                </tr>
+                {{/each}}
+            </tbody>
+        </table>
+    </div>
+    {{/each}}
+</form>

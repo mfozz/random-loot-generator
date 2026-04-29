@@ -39,8 +39,15 @@
 
     .creature-type-loot-window {
         min-width: 580px;
-        max-height: 80vh;
+        max-height: calc(100vh - 80px);
+        display: flex;
+        flex-direction: column;
+    }
+
+    .creature-type-loot-window .window-content {
+        max-height: calc(100vh - 120px);
         overflow-y: auto;
+        min-height: 0;
     }
 
     .header-label {
@@ -214,7 +221,6 @@ margin-bottom: 20px;
     {{/each}}
 
 </form>
-
 
 
 

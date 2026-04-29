@@ -4,8 +4,59 @@ const RLG_DEBUG = () => {
   try { return game.settings.get("random-loot-generator", "debugLogging"); } catch (e) { return false; }
 };
 const rlgDebug = (...args) => { if (RLG_DEBUG()) console.debug("[RLG]", ...args); };
+const RLG_CURRENCY_TYPES = ["cp", "sp", "ep", "gp", "pp"];
+const RLG_DEFAULT_CURRENCY_TYPES = RLG_CURRENCY_TYPES.join(",");
 
 const _rlgCountCache = { packs: new Map(), folders: new Map(), tables: new Map() };
+
+function rlgGetEnabledCurrencyTypes(moduleName = "random-loot-generator") {
+  let setting;
+  try {
+    setting = game.settings.get(moduleName, "enabledCurrencyTypes");
+  } catch (e) {
+    setting = RLG_DEFAULT_CURRENCY_TYPES;
+  }
+
+  const rawTypes = Array.isArray(setting)
+    ? setting
+    : String(setting ?? RLG_DEFAULT_CURRENCY_TYPES).split(",");
+
+  return rawTypes
+    .map(type => String(type).trim().toLowerCase())
+    .filter((type, index, types) => RLG_CURRENCY_TYPES.includes(type) && types.indexOf(type) === index);
+}
+
+function rlgEmptyCurrency() {
+  return RLG_CURRENCY_TYPES.reduce((currency, type) => {
+    currency[type] = 0;
+    return currency;
+  }, {});
+}
+
+async function rlgMaybeRollCurrency(currency, enabledCurrencyTypes, type, formula, multiplier = 1, skipChance = 0.2) {
+  if (!enabledCurrencyTypes.includes(type)) return false;
+  if (Math.random() <= skipChance) return false;
+
+  const roll = await new Roll(formula).evaluate();
+  currency[type] = Math.floor(roll.total * multiplier);
+  return currency[type] > 0;
+}
+
+async function rlgForceMinimumCurrency(currency, enabledCurrencyTypes, preferredTypes) {
+  const type = preferredTypes.find(type => enabledCurrencyTypes.includes(type));
+  if (!type) return false;
+
+  const formulas = {
+    cp: "1d4",
+    sp: "1d6",
+    ep: "1d4",
+    gp: "1d6",
+    pp: "1d2"
+  };
+
+  currency[type] = (await new Roll(formulas[type]).evaluate()).total;
+  return true;
+}
 
 async function rlgCountPackItems(pack) {
   try {
@@ -54,11 +105,10 @@ function rlgCountResolvableTableRows(table) {
     if (_rlgCountCache.tables.has(table.id)) return _rlgCountCache.tables.get(table.id);
 
     const results = table.results ?? [];
-    const resolvable = results.filter(r =>
-      r?.type === "document" &&
-      typeof r.documentCollection === "string" &&
-      !!r.documentId
-    ).length;
+    const resolvable = results.filter(r => {
+      if (rlgIsTextTableResult(r)) return !!rlgTableResultLabel(r);
+      return rlgIsDocumentTableResult(r) && rlgTableResultLooksLikeItem(r);
+    }).length;
 
     _rlgCountCache.tables.set(table.id, resolvable);
     rlgDebug(`Counted table rows for ${table.name}: resolvable=${resolvable}`);
@@ -69,12 +119,92 @@ function rlgCountResolvableTableRows(table) {
   }
 }
 
+function rlgIsDocumentTableResult(result) {
+  const type = result?.type;
+  const documentType = globalThis.CONST?.TABLE_RESULT_TYPES?.DOCUMENT;
+  return type === "document" || type === documentType || type === 1;
+}
+
+function rlgIsTextTableResult(result) {
+  const type = result?.type;
+  const textType = globalThis.CONST?.TABLE_RESULT_TYPES?.TEXT;
+  return type === "text" || type === textType || type === 0;
+}
+
+function rlgPackFromUuid(uuid) {
+  if (typeof uuid !== "string" || !uuid.startsWith("Compendium.")) return "";
+  const parts = uuid.split(".");
+  return parts.length >= 3 ? `${parts[1]}.${parts[2]}` : "";
+}
+
+function rlgTableResultDocumentUuid(result) {
+  const directUuid = result?.documentUuid || result?._source?.documentUuid;
+  if (typeof directUuid === "string" && directUuid) return directUuid;
+
+  const legacyUuid = result?._source?.uuid || result?.uuid;
+  if (typeof legacyUuid === "string" && (legacyUuid.startsWith("Item.") || legacyUuid.includes(".Item."))) return legacyUuid;
+
+  const collection = result?._source?.documentCollection;
+  const documentId = result?._source?.documentId;
+  if (typeof collection !== "string" || typeof documentId !== "string" || !collection || !documentId) return "";
+  if (collection === "Item" || collection === "items") return `Item.${documentId}`;
+  if (collection.startsWith("Compendium.")) return `${collection}.Item.${documentId}`;
+  if (collection.includes(".")) return `Compendium.${collection}.Item.${documentId}`;
+  return "";
+}
+
+function rlgTableResultLooksLikeItem(result) {
+  const uuid = rlgTableResultDocumentUuid(result);
+  return typeof uuid === "string" && (uuid.startsWith("Item.") || uuid.includes(".Item."));
+}
+
+function rlgTableResultLabel(result) {
+  return result?.name || result?.description || result?._source?.name || result?._source?.description || result?._source?.text;
+}
+
+async function rlgDocumentFromTableResult(result) {
+  if (!rlgIsDocumentTableResult(result) || !rlgTableResultLooksLikeItem(result)) return null;
+  const uuid = rlgTableResultDocumentUuid(result);
+  try {
+    const doc = await fromUuid(uuid);
+    if (doc?.documentName !== "Item" && doc?.constructor?.documentName !== "Item") {
+      rlgDebug("Ignoring non-Item table result", uuid, doc?.documentName || doc?.constructor?.documentName || doc?.type);
+      return null;
+    }
+    return doc;
+  } catch (e) {
+    rlgDebug("Failed to resolve table result UUID", uuid, e);
+    return null;
+  }
+}
+
+function rlgSyntheticItemFromTableResult(result) {
+  const name = rlgTableResultLabel(result);
+  if (!name) return null;
+  return {
+    name,
+    type: "loot",
+    img: result.img || "icons/svg/mystery-man.svg",
+    system: { rarity: "Common" }
+  };
+}
+
+function rlgPrepareItemData(item) {
+  const data = item?.toObject ? item.toObject() : item;
+  if (!data || data.type === "document") return null;
+  if (item?.documentName && item.documentName !== "Item") return null;
+  if (item?.constructor?.documentName && item.constructor.documentName !== "Item") return null;
+  if (data._id === undefined && item?.id) data._id = item.id;
+  return data;
+}
+
 
 
 
 async function rlgDecorateSourceDialog(app, html) {
   rlgInsertStylesOnce(app);
-  const $html = $(html);
+  const element = rlgAsElement(html);
+  if (!element) return;
   _rlgCountCache.packs.clear();
   _rlgCountCache.folders.clear();
   _rlgCountCache.tables.clear();
@@ -83,9 +213,9 @@ async function rlgDecorateSourceDialog(app, html) {
   // Wait longer for DOM to stabilize
   await new Promise(resolve => setTimeout(resolve, 300));
 
-  const labels = $html.find('label').filter(function () {
-    return $(this).find('input[name="compendium"], input[name="folder"], input[name="table"]').length > 0;
-  });
+  const labels = Array.from(element.querySelectorAll('label')).filter(label =>
+    label.querySelector('input[name="compendium"], input[name="folder"], input[name="table"]')
+  );
 
   if (!labels.length) {
     rlgDebug("No matching labels found in dialog", app.title);
@@ -93,19 +223,18 @@ async function rlgDecorateSourceDialog(app, html) {
   }
 
 for (const label of labels) {
-  const $label = $(label);
-  const $input = $label.find('input');
-  const $span  = $label.find('span');
-  if (!$span.length) {
-    rlgDebug("No span found in label", $label.html());
+  const input = label.querySelector('input');
+  const span = label.querySelector('span');
+  if (!span) {
+    rlgDebug("No span found in label", label.innerHTML);
     continue;
   }
-  const type  = $input.attr('name');
-  const value = $input.val();
+  const type = input.name;
+  const value = input.value;
   let count = 0;
 
   // Hoist for catch safety
-  const currentText = $span.text().trim();
+  const currentText = span.textContent.trim();
 
   try {
     if (type === 'compendium') {
@@ -120,22 +249,23 @@ for (const label of labels) {
 
     // Append "(N)" only if missing
     if (!/\(\d+\)$/.test(currentText)) {
-      $span.text(`${currentText} (${count})`);
+      span.textContent = `${currentText} (${count})`;
     }
 
     if (count === 0) {
-      $label.addClass('rlg-source--disabled');
-      $input.prop('disabled', true).prop('checked', false);
-      $label.attr('title', game.i18n.localize("RLG.NoItemsFound"));
-      $input.attr('title', game.i18n.localize("RLG.NoItemsFound"));
-      $input.css({ cursor: 'not-allowed' });
+      label.classList.add('rlg-source--disabled');
+      input.disabled = true;
+      input.checked = false;
+      label.title = game.i18n.localize("RLG.NoItemsFound");
+      input.title = game.i18n.localize("RLG.NoItemsFound");
+      input.style.cursor = 'not-allowed';
       rlgDebug(`Applied rlg-source--disabled, unchecked, title, and cursor for ${type} source: ${value}`);
     } else {
-      $label.removeClass('rlg-source--disabled');
-      $input.prop('disabled', false);
-      $label.removeAttr('title');
-      $input.removeAttr('title');
-      $input.css({ cursor: '' });
+      label.classList.remove('rlg-source--disabled');
+      input.disabled = false;
+      label.removeAttribute('title');
+      input.removeAttribute('title');
+      input.style.cursor = '';
     }
 
     rlgDebug(`Decorated ${type} source: ${value} with count ${count}`);
@@ -143,38 +273,38 @@ for (const label of labels) {
     rlgDebug(`Failed to decorate ${type} source: ${value}`, e);
 
     // Keep the "(N)" if already present; otherwise show (0)
-    $span.text(/\(\d+\)$/.test(currentText) ? currentText : `${currentText} (0)`);
+    span.textContent = /\(\d+\)$/.test(currentText) ? currentText : `${currentText} (0)`;
 
-    $label.addClass('rlg-source--disabled');
-    $input.prop('disabled', true).prop('checked', false);
-    $label.attr('title', game.i18n.localize("RLG.NoItemsFound"));
-    $input.attr('title', game.i18n.localize("RLG.NoItemsFound"));
-    $input.css({ cursor: 'not-allowed' });
+    label.classList.add('rlg-source--disabled');
+    input.disabled = true;
+    input.checked = false;
+    label.title = game.i18n.localize("RLG.NoItemsFound");
+    input.title = game.i18n.localize("RLG.NoItemsFound");
+    input.style.cursor = 'not-allowed';
     rlgDebug(`Applied rlg-source--disabled, unchecked, title, and cursor for ${type} source: ${value} (error case)`);
-    rlgDebug(`Label title: ${$label.attr('title')}, Input disabled: ${$input.prop('disabled')}, Input cursor: ${$input.css('cursor')}, Input title: ${$input.attr('title')}`);
+    rlgDebug(`Label title: ${label.title}, Input disabled: ${input.disabled}, Input cursor: ${input.style.cursor}, Input title: ${input.title}`);
   }
 }
 
 
   // Re-apply attributes after a second delay to counter post-rendering changes
   setTimeout(() => {
-    labels.each((i, label) => {
-      const $label = $(label);
-      const $input = $label.find('input');
-      const type = $input.attr('name');
-      const value = $input.val();
+    labels.forEach(label => {
+      const input = label.querySelector('input');
+      const type = input.name;
+      const value = input.value;
       const count = type === 'compendium' ? _rlgCountCache.packs.get(value) || 0 :
                     type === 'folder' ? _rlgCountCache.folders.get(value) || 0 :
                     type === 'table' ? _rlgCountCache.tables.get(value) || 0 : 0;
       if (count === 0) {
-        $label.addClass('rlg-source--disabled');
-        $input.prop('disabled', true);
-        $input.prop('checked', false);
-        $label.attr('title', game.i18n.localize("RLG.NoItemsFound"));
-        $input.attr('title', game.i18n.localize("RLG.NoItemsFound"));
-        $input.css({ cursor: 'not-allowed' });
+        label.classList.add('rlg-source--disabled');
+        input.disabled = true;
+        input.checked = false;
+        label.title = game.i18n.localize("RLG.NoItemsFound");
+        input.title = game.i18n.localize("RLG.NoItemsFound");
+        input.style.cursor = 'not-allowed';
         rlgDebug(`Re-applied attributes for ${type} source: ${value} after delay`);
-        rlgDebug(`Re-applied - Label title: ${$label.attr('title')}, Input disabled: ${$input.prop('disabled')}, Input cursor: ${$input.css('cursor')}, Input title: ${$input.attr('title')}`);
+        rlgDebug(`Re-applied - Label title: ${label.title}, Input disabled: ${input.disabled}, Input cursor: ${input.style.cursor}, Input title: ${input.title}`);
       }
     });
   }, 500);
@@ -187,7 +317,8 @@ for (const label of labels) {
 // === RLG Debug + Source Count Helpers ===
 function rlgInsertStylesOnce(app) {
   const styleId = `rlg-styles-${app.id || 'global'}`;
-  if (app.element?.[0].querySelector(`#${styleId}`) || document.querySelector(`#${styleId}`)) return;
+  const element = rlgAsElement(app.element);
+  if (element?.querySelector(`#${styleId}`) || document.querySelector(`#${styleId}`)) return;
   const style = document.createElement('style');
   style.id = styleId;
   style.textContent = `
@@ -199,7 +330,7 @@ function rlgInsertStylesOnce(app) {
       pointer-events: none !important;
     }
   `;
-  const dialogContent = app.element?.[0]?.querySelector('.dialog-content') || app.element?.[0] || document.head;
+  const dialogContent = element?.querySelector('.dialog-content, .window-content') || element || document.head;
   dialogContent.appendChild(style);
   rlgDebug(`Inserted RLG styles for dialog ${app.id || 'global'} into ${dialogContent === document.head ? 'document.head' : 'dialog content'}`);
 }
@@ -210,6 +341,241 @@ function rlgNormalizeRarity(r) {
   if (!s) return "Common";
   if (s.includes("very") && s.includes("rare")) return "Very Rare";
   return s.replace(/\b\w/g, c => c.toUpperCase());
+}
+
+const RLG_MODULE_ID = "random-loot-generator";
+const RLG_API = foundry.applications.api;
+const RLG_DialogV2 = RLG_API.DialogV2;
+
+function rlgLocalize(key) {
+  return game.i18n.localize(key);
+}
+
+function rlgFormat(key, data) {
+  return game.i18n.format(key, data);
+}
+
+function rlgAsElement(html) {
+  if (html instanceof HTMLElement) return html;
+  if (html?.[0] instanceof HTMLElement) return html[0];
+  return null;
+}
+
+function rlgRenderApplication(app) {
+  if (!app?.render) return;
+  return app instanceof RLG_API.ApplicationV2 ? app.render({ force: true }) : app.render(true);
+}
+
+function rlgNormalizeCompendiumSetting(value) {
+  if (Array.isArray(value)) return value.filter(id => id && game.packs.get(id));
+  if (typeof value === "string") {
+    return value.split(",").map(id => id.trim()).filter(id => id && game.packs.get(id));
+  }
+  return [];
+}
+
+function rlgDefaultLootSettings() {
+  return {
+    compendiums: [],
+    folders: [],
+    tables: [],
+    quantityFormula: "",
+    maxRarity: "",
+    currencyChance: null,
+    itemChance: null
+  };
+}
+
+function rlgNormalizeLootSettings(settings = {}) {
+  return {
+    ...rlgDefaultLootSettings(),
+    ...settings,
+    compendiums: Array.isArray(settings.compendiums) ? settings.compendiums.filter(id => game.packs.get(id)) : [],
+    folders: Array.isArray(settings.folders) ? settings.folders.filter(id => game.folders.get(id)) : [],
+    tables: Array.isArray(settings.tables) ? settings.tables.filter(id => game.tables.get(id)) : [],
+    currencyChance: settings.currencyChance ?? null,
+    itemChance: settings.itemChance ?? null
+  };
+}
+
+function rlgDocumentFlagEnabled(document, key) {
+  return document?.getFlag?.(RLG_MODULE_ID, key) || false;
+}
+
+function rlgDocumentFlagSettings(document, key) {
+  return document?.getFlag?.(RLG_MODULE_ID, key);
+}
+
+function rlgDocumentHasFlag(document, key) {
+  return Object.prototype.hasOwnProperty.call(document?.flags?.[RLG_MODULE_ID] || {}, key);
+}
+
+function rlgFlagValue(source, key) {
+  return source?.flags?.[RLG_MODULE_ID]?.[key];
+}
+
+function rlgHasFlagValue(source, key) {
+  return Object.prototype.hasOwnProperty.call(source?.flags?.[RLG_MODULE_ID] || {}, key);
+}
+
+function rlgTokenOverrideEnabled(token) {
+  if (rlgDocumentHasFlag(token?.document, "tokenLootEnabled")) return rlgDocumentFlagEnabled(token.document, "tokenLootEnabled");
+  return rlgDocumentFlagEnabled(token?.actor, "customLootEnabled");
+}
+
+function rlgTokenOverrideSettings(token) {
+  if (rlgDocumentHasFlag(token?.document, "tokenLootSettings")) return rlgDocumentFlagSettings(token.document, "tokenLootSettings");
+  return rlgDocumentFlagSettings(token?.actor, "lootSettings");
+}
+
+function rlgPrototypeLootEnabled(actor) {
+  return rlgFlagValue(actor?.prototypeToken, "defaultLootEnabled") || false;
+}
+
+function rlgPrototypeLootSettings(actor) {
+  return rlgFlagValue(actor?.prototypeToken, "defaultLootSettings") || {};
+}
+
+function rlgResolveLootOverride(token) {
+  const tokenEnabled = rlgTokenOverrideEnabled(token);
+  if (tokenEnabled) {
+    return {
+      source: "token",
+      enabled: true,
+      settings: rlgNormalizeLootSettings(rlgTokenOverrideSettings(token))
+    };
+  }
+
+  const actor = token?.actor;
+  if (rlgHasFlagValue(token?.document, "defaultLootEnabled") && rlgFlagValue(token.document, "defaultLootEnabled")) {
+    return {
+      source: "prototype",
+      enabled: true,
+      settings: rlgNormalizeLootSettings(rlgFlagValue(token.document, "defaultLootSettings") || {})
+    };
+  }
+
+  if (rlgPrototypeLootEnabled(actor)) {
+    return {
+      source: "prototype",
+      enabled: true,
+      settings: rlgNormalizeLootSettings(rlgPrototypeLootSettings(actor))
+    };
+  }
+
+  return {
+    source: "creatureType",
+    enabled: false,
+    settings: rlgDefaultLootSettings()
+  };
+}
+
+function rlgSelectedSourcesFromForm(form) {
+  const formData = new FormData(form);
+  return {
+    compendiums: formData.getAll("compendium").filter(Boolean),
+    folders: formData.getAll("folder").filter(Boolean),
+    tables: formData.getAll("table").filter(Boolean)
+  };
+}
+
+async function rlgBuildSourceSelectionContent({ selectedCompendiums = [], selectedFolders = [], selectedTables = [] } = {}) {
+  const packs = game.packs.contents.filter(p => p.metadata.type === "Item");
+  const folders = game.folders.filter(f => f.type === "Item" && f.contents.length > 0);
+  const tables = game.tables.contents;
+  let content = `<div class="rlg-source-dialog" style="max-height: 400px; overflow-y: auto;">`;
+
+  content += `<h3>${rlgLocalize("RLG.CompendiumSelection.Compendiums")}</h3>`;
+  if (packs.length === 0) content += `<p>${rlgLocalize("RLG.CompendiumSelection.NoCompendiums")}</p>`;
+  else {
+    const compendiumHtml = await Promise.all(packs.map(async pack => {
+      const count = await rlgCountPackItems(pack);
+      const checked = count > 0 && selectedCompendiums.includes(pack.collection) ? "checked" : "";
+      const disabled = count === 0 ? "disabled" : "";
+      const title = count === 0 ? `title="${rlgLocalize("RLG.NoItemsFound")}"` : "";
+      return `<label style="display: inline-flex; align-items: center; gap: 6px;" ${title}>
+        <input type="checkbox" name="compendium" value="${pack.collection}" ${checked} ${disabled} style="margin: 0; cursor: ${count === 0 ? 'not-allowed' : 'default'};" ${title}>
+        <span style="vertical-align: middle;">${pack.metadata.label} (${count})</span>
+      </label><br>`;
+    }));
+    content += compendiumHtml.join("");
+  }
+
+  content += `<h3>${rlgLocalize("RLG.CompendiumSelection.Folders")}</h3>`;
+  if (folders.length === 0) content += `<p>${rlgLocalize("RLG.CompendiumSelection.NoFolders")}</p>`;
+  content += folders.map(folder => {
+    const count = rlgCountFolderItems(folder.id);
+    const checked = count > 0 && selectedFolders.includes(folder.id) ? "checked" : "";
+    const disabled = count === 0 ? "disabled" : "";
+    const title = count === 0 ? `title="${rlgLocalize("RLG.NoItemsFound")}"` : "";
+    return `<label style="display: inline-flex; align-items: center; gap: 6px;" ${title}>
+      <input type="checkbox" name="folder" value="${folder.id}" ${checked} ${disabled} style="margin: 0; cursor: ${count === 0 ? 'not-allowed' : 'default'};" ${title}>
+      <span style="vertical-align: middle;">${folder.name} (${count})</span>
+    </label><br>`;
+  }).join("");
+
+  content += `<h3>${rlgLocalize("RLG.CompendiumSelection.RollTables")}</h3>`;
+  if (tables.length === 0) content += `<p>${rlgLocalize("RLG.CompendiumSelection.NoTables")}</p>`;
+  content += tables.map(table => {
+    const count = rlgCountResolvableTableRows(table);
+    const checked = count > 0 && selectedTables.includes(table.id) ? "checked" : "";
+    const disabled = count === 0 ? "disabled" : "";
+    const title = count === 0 ? `title="${rlgLocalize("RLG.NoItemsFound")}"` : "";
+    return `<label style="display: inline-flex; align-items: center; gap: 6px;" ${title}>
+      <input type="checkbox" name="table" value="${table.id}" ${checked} ${disabled} style="margin: 0; cursor: ${count === 0 ? 'not-allowed' : 'default'};" ${title}>
+      <span style="vertical-align: middle;">${table.name} (${count})</span>
+    </label><br>`;
+  }).join("");
+
+  content += `</div>`;
+  return content;
+}
+
+async function rlgOpenSourceSelectionDialog({ title, selectedCompendiums, selectedFolders, selectedTables, requireSelection = true, onSave }) {
+  const content = await rlgBuildSourceSelectionContent({ selectedCompendiums, selectedFolders, selectedTables });
+  new RLG_DialogV2({
+    window: { title },
+    content,
+    buttons: [{
+      action: "save",
+      icon: "fa-solid fa-save",
+      label: rlgLocalize("RLG.ManageLootSources.Save"),
+      default: true,
+      callback: async (event, button) => {
+        const selected = rlgSelectedSourcesFromForm(button.form);
+        if (requireSelection && !selected.compendiums.length && !selected.folders.length && !selected.tables.length) {
+          ui.notifications.warn(rlgLocalize("RLG.Notification.SelectAtLeastOneSource"));
+          return false;
+        }
+        await onSave(selected);
+      }
+    }, {
+      action: "cancel",
+      icon: "fa-solid fa-xmark",
+      label: rlgLocalize("RLG.ManageLootSources.Cancel")
+    }]
+  }).render({ force: true });
+}
+
+class RLGApplicationV2 extends RLG_API.ApplicationV2 {
+  static DEFAULT_OPTIONS = {
+    classes: [],
+    window: { frame: true, positioned: true, minimizable: true, resizable: true },
+    position: { height: "auto" }
+  };
+
+  static template = "";
+
+  async _renderHTML(context, options) {
+    const html = await foundry.applications.handlebars.renderTemplate(this.constructor.template, context);
+    const template = document.createElement("template");
+    template.innerHTML = html.trim();
+    return template.content;
+  }
+
+  _replaceHTML(result, content, options) {
+    content.replaceChildren(result);
+  }
 }
 
 
@@ -328,16 +694,11 @@ if (rawCompendiums === undefined) {
         let creatureLootSettings = game.settings.get(this.moduleName, "creatureTypeLoot") || {};
         let typeSettings = creatureLootSettings[creatureType] || {};
 
-        // Check for token-specific settings
-        let lootSettings = {};
-        const customLootEnabled = await token.actor.getFlag(this.moduleName, "customLootEnabled") || false;
-        if (customLootEnabled) {
-            lootSettings = (await token.actor.getFlag(this.moduleName, "lootSettings")) || {};
-            console.log(`Using custom loot settings for ${token.name}:`, lootSettings);
-        } else {
-            lootSettings = typeSettings;
-            console.log(`Using creature type settings for ${creatureType}:`, lootSettings);
-        }
+        // Check for token-specific or prototype-token default settings.
+        const override = rlgResolveLootOverride(token);
+        let lootSettings = override.enabled ? override.settings : typeSettings;
+        const customLootEnabled = override.enabled;
+        console.log(`Using ${override.source} loot settings for ${token.name || creatureType}:`, lootSettings);
 
         let hasTypeSettings = customLootEnabled ? (
             (Array.isArray(lootSettings.compendiums) && lootSettings.compendiums.length > 0) ||
@@ -351,7 +712,7 @@ if (rawCompendiums === undefined) {
 
         let selectedCompendiums = hasTypeSettings
             ? (Array.isArray(lootSettings.compendiums) ? lootSettings.compendiums : [])
-            : (this.selectedCompendiums.length > 0 ? this.selectedCompendiums : game.settings.get(this.moduleName, "selectedCompendiums").split(",").map(comp => comp.trim()).filter(comp => comp && game.packs.get(comp)));
+            : (this.selectedCompendiums.length > 0 ? this.selectedCompendiums : rlgNormalizeCompendiumSetting(game.settings.get(this.moduleName, "selectedCompendiums")));
         let selectedFolders = hasTypeSettings
             ? (Array.isArray(lootSettings.folders) ? lootSettings.folders : [])
             : (this.selectedFolders.length > 0 ? this.selectedFolders : game.settings.get(this.moduleName, "selectedFolders") || []);
@@ -391,9 +752,10 @@ if (compPacksWithCount.length === 0 && foldersWithCount.length === 0 && tablesWi
         selectedTables = tablesWithCount.map(t => t.id);
         // --- End prefilter ---
 
-        let quantityFormula = lootSettings.quantityFormula || game.settings.get(this.moduleName, "randomQuantityFormula") || "1d4";
-        let currencyChance = lootSettings.currencyChance !== null && lootSettings.currencyChance !== undefined && lootSettings.currencyChance !== "" ? lootSettings.currencyChance : game.settings.get(this.moduleName, "defaultCurrencyChance") || 75;
-        let itemChance = lootSettings.itemChance !== null && lootSettings.itemChance !== undefined && lootSettings.itemChance !== "" ? lootSettings.itemChance : 100;
+        const itemTuning = rlgResolveItemTuning({ creatureType, token, typeSettings, lootSettings, customLootEnabled });
+        let quantityFormula = itemTuning.quantityFormula || "1d4";
+        let currencyChance = rlgResolveCurrencyChance(typeSettings, lootSettings, customLootEnabled);
+        let itemChance = itemTuning.itemChance;
 
         console.log(`Fetching loot for ${creatureType}. Custom enabled: ${customLootEnabled}. Using compendiums:`, selectedCompendiums, "Folders:", selectedFolders, "Tables:", selectedTables, "Quantity Formula:", quantityFormula, "Item Chance:", itemChance, "Currency Chance:", currencyChance);
 
@@ -405,8 +767,8 @@ if (!selectedCompendiums.length && !selectedFolders.length && !selectedTables.le
 }
 
 
-        let maxRarity = lootSettings.maxRarity || game.settings.get(this.moduleName, "maxRarity") || "Legendary";
-        let rarityLevels = ["Common", "Uncommon", "Rare", "Very Rare", "Legendary"];
+        let maxRarity = itemTuning.maxRarity || "Legendary";
+        let rarityLevels = RLG_RARITY_LEVELS;
         let allowedRarities = rarityLevels.slice(0, rarityLevels.indexOf(maxRarity) + 1);
         console.log("Allowed rarities:", allowedRarities);
         // --- Equal-priority source helpers ---
@@ -462,36 +824,22 @@ async function pickFromTable(tableId) {
   const res = rollResult.results?.[0];
   if (!res) return null;
 
-  if (res.type === 'document' || res.type === 1) {
-    const id = res.documentId || res.resultId;
-    const collection = res.documentCollection || res.collection;
-
-    let item = null;
-    if (collection === "Item") {
-      // World item id
-      item = game.items.get(id) || await game.packs.get("dnd5e.items")?.getDocument(id);
-    } else if (collection) {
-      item = await game.packs.get(collection)?.getDocument(id);
-    }
+  if (rlgIsDocumentTableResult(res)) {
+    const item = await rlgDocumentFromTableResult(res);
 
     if (!item) return null;
 
 
 
-    const itemData = item.toObject();
-    itemData._id = item.id;
-    itemData.pack = item.pack || collection || "";
+    const itemData = rlgPrepareItemData(item);
+    if (!itemData) return null;
+    itemData.pack = item.pack || rlgPackFromUuid(rlgTableResultDocumentUuid(res)) || "";
     return itemData;
   }
 
-  if (res.type === 0) {
+  if (rlgIsTextTableResult(res)) {
     // Text result – synthesize a simple item
-    return {
-      name: res.text,
-      type: "item",
-      img: res.img || "icons/svg/mystery-man.svg",
-      system: { rarity: "Common" }
-    };
+    return rlgSyntheticItemFromTableResult(res);
   }
 
   return null;
@@ -646,22 +994,17 @@ async function getItemFromTable(table) {
     const results = rollResult?.results ?? [];
 
     for (const result of results) {
-      // Minimal legacy-safe extraction; swap to result.uuid later if you like
-      const id = result.documentId ?? result.resultId;
-      const collection = result.documentCollection ?? result.collection;
-      if (!id) continue;
+      if (rlgIsTextTableResult(result)) return rlgSyntheticItemFromTableResult(result);
 
-      let doc = null;
-      if (collection === "Item") doc = game.items.get(id) ?? null;
-      else if (collection && typeof collection === "string") doc = await game.packs.get(collection)?.getDocument(id);
+      const doc = await rlgDocumentFromTableResult(result);
       if (!doc) continue;
 
       const rar = normalizeRarity(doc.system?.rarity);
       if (!rarityAllowed(rar)) continue;
 
-      const data = doc.toObject();
-      data._id = doc.id;
-      data.pack = doc.pack || collection || "";
+      const data = rlgPrepareItemData(doc);
+      if (!data) continue;
+      data.pack = doc.pack || rlgPackFromUuid(rlgTableResultDocumentUuid(result)) || "";
       return data;
     }
 
@@ -708,72 +1051,77 @@ for (const src of shuffled) {
 // --- End equal-priority item generation ---
 
 
-        let currency = { cp: 0, sp: 0, gp: 0, pp: 0 };
+        let currency = rlgEmptyCurrency();
+        const enabledCurrencyTypes = rlgGetEnabledCurrencyTypes(this.moduleName);
         let useCRBasedCurrency = game.settings.get(this.moduleName, "useCRBasedCurrency");
         if (useCRBasedCurrency && token?.actor?.system?.details?.cr !== undefined) {
             let cr = token.actor.system.details.cr;
-            console.log(`Generating CR-based currency for CR ${cr} with ${currencyChance}% chance`);
+            console.log(`Generating CR-based currency for CR ${cr} with ${currencyChance}% chance. Enabled coin types: ${enabledCurrencyTypes.join(", ") || "none"}`);
             let currencyRoll = Math.random() * 100;
-            if (currencyRoll <= currencyChance) {
+            if (currencyRoll <= currencyChance && enabledCurrencyTypes.length) {
                 let generated = false;
                 const skipChance = 0.2;
                 if (cr <= 1) {
-                    if (Math.random() > skipChance) { currency.cp = (await new Roll("3d6").evaluate()).total; generated = true; }
-                    if (Math.random() > skipChance) { currency.sp = (await new Roll("1d4").evaluate()).total; generated = true; }
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "cp", "3d6", 1, skipChance) || generated;
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "sp", "1d4", 1, skipChance) || generated;
                 } else if (cr <= 4) {
-                    if (Math.random() > skipChance) { currency.cp = (await new Roll("5d6").evaluate()).total; generated = true; }
-                    if (Math.random() > skipChance) { currency.sp = (await new Roll("2d6").evaluate()).total; generated = true; }
-                    if (Math.random() > skipChance) { currency.gp = (await new Roll("1d4").evaluate()).total; generated = true; }
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "cp", "5d6", 1, skipChance) || generated;
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "sp", "2d6", 1, skipChance) || generated;
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "ep", "1d4", 1, skipChance) || generated;
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "gp", "1d4", 1, skipChance) || generated;
                 } else if (cr <= 8) {
-                    if (Math.random() > skipChance) { currency.sp = (await new Roll("1d6 * 5").evaluate()).total; generated = true; }
-                    if (Math.random() > skipChance) { currency.gp = (await new Roll("1d6 * 5").evaluate()).total; generated = true; }
-                    if (Math.random() > skipChance) { currency.pp = (await new Roll("1d4").evaluate()).total; generated = true; }
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "sp", "1d6 * 5", 1, skipChance) || generated;
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "ep", "1d6 * 3", 1, skipChance) || generated;
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "gp", "1d6 * 5", 1, skipChance) || generated;
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "pp", "1d4", 1, skipChance) || generated;
                 } else if (cr <= 12) {
-                    if (Math.random() > skipChance) { currency.gp = (await new Roll("1d6 * 10").evaluate()).total; generated = true; }
-                    if (Math.random() > skipChance) { currency.pp = (await new Roll("1d6 * 2").evaluate()).total; generated = true; }
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "ep", "1d6 * 5", 1, skipChance) || generated;
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "gp", "1d6 * 10", 1, skipChance) || generated;
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "pp", "1d6 * 2", 1, skipChance) || generated;
                 } else if (cr <= 16) {
-                    if (Math.random() > skipChance) { currency.gp = (await new Roll("1d6 * 30").evaluate()).total; generated = true; }
-                    if (Math.random() > skipChance) { currency.pp = (await new Roll("1d6 * 5").evaluate()).total; generated = true; }
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "gp", "1d6 * 30", 1, skipChance) || generated;
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "pp", "1d6 * 5", 1, skipChance) || generated;
                 } else {
-                    if (Math.random() > skipChance) { currency.gp = (await new Roll("2d6 * 50").evaluate()).total; generated = true; }
-                    if (Math.random() > skipChance) { currency.pp = (await new Roll("1d6 * 10").evaluate()).total; generated = true; }
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "gp", "2d6 * 50", 1, skipChance) || generated;
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "pp", "1d6 * 10", 1, skipChance) || generated;
                 }
                 if (!generated) {
                     console.log("All currency types skipped, forcing minimal generation");
-                    if (cr <= 1) currency.cp = (await new Roll("1d4").evaluate()).total;
-                    else if (cr <= 4) currency.sp = (await new Roll("1d6").evaluate()).total;
-                    else if (cr <= 8) currency.gp = (await new Roll("1d6").evaluate()).total;
-                    else currency.gp = (await new Roll("1d6 * 5").evaluate()).total;
+                    if (cr <= 1) await rlgForceMinimumCurrency(currency, enabledCurrencyTypes, ["cp", "sp", "ep", "gp", "pp"]);
+                    else if (cr <= 4) await rlgForceMinimumCurrency(currency, enabledCurrencyTypes, ["sp", "ep", "gp", "cp", "pp"]);
+                    else if (cr <= 8) await rlgForceMinimumCurrency(currency, enabledCurrencyTypes, ["gp", "ep", "sp", "pp", "cp"]);
+                    else await rlgForceMinimumCurrency(currency, enabledCurrencyTypes, ["gp", "pp", "ep", "sp", "cp"]);
                 }
                 console.log(`Generated CR-based currency for CR ${cr}:`, currency);
+            } else if (!enabledCurrencyTypes.length) {
+                console.log("No currency generated because all coin types are disabled.");
             } else {
                 console.log(`No currency generated for ${customLootEnabled ? token.name : creatureType} (roll ${currencyRoll.toFixed(1)} vs ${currencyChance}%)`);
             }
         } else {
             let currencyFormula = game.settings.get(this.moduleName, "currencyFormula") || "1d10";
-            console.log(`Generating fixed-formula currency with "${currencyFormula}" and ${currencyChance}% chance`);
+            console.log(`Generating fixed-formula currency with "${currencyFormula}" and ${currencyChance}% chance. Enabled coin types: ${enabledCurrencyTypes.join(", ") || "none"}`);
             let currencyRoll = Math.random() * 100;
-            if (currencyRoll <= currencyChance) {
+            if (currencyRoll <= currencyChance && enabledCurrencyTypes.length) {
                 try {
-                    let cpRoll = await new Roll(currencyFormula).evaluate();
-                    let spRoll = await new Roll(currencyFormula).evaluate();
-                    let gpRoll = await new Roll(currencyFormula).evaluate();
-                    let ppRoll = await new Roll("1d4").evaluate();
                     const skipChance = 0.2;
                     let generated = false;
-                    if (Math.random() > skipChance) { currency.cp = cpRoll.total * 10; generated = true; }
-                    if (Math.random() > skipChance) { currency.sp = spRoll.total * 5; generated = true; }
-                    if (Math.random() > skipChance) { currency.gp = gpRoll.total; generated = true; }
-                    if (Math.random() > skipChance) { currency.pp = Math.floor(ppRoll.total / 2); generated = true; }
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "cp", currencyFormula, 10, skipChance) || generated;
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "sp", currencyFormula, 5, skipChance) || generated;
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "ep", currencyFormula, 2, skipChance) || generated;
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "gp", currencyFormula, 1, skipChance) || generated;
+                    generated = await rlgMaybeRollCurrency(currency, enabledCurrencyTypes, "pp", "1d4", 0.5, skipChance) || generated;
                     if (!generated) {
                         console.log("All currency types skipped, forcing minimal generation");
-                        currency.gp = (await new Roll("1d4").evaluate()).total;
+                        await rlgForceMinimumCurrency(currency, enabledCurrencyTypes, ["gp", "ep", "sp", "cp", "pp"]);
                     }
                     console.log(`Generated currency:`, currency);
                 } catch (error) {
                     console.error(`❌ ERROR: Invalid currency formula "${currencyFormula}". Defaulting to 0.`);
                     ui.notifications.error(game.i18n.format("RLG.Notification.InvalidCurrencyFormula", { formula: currencyFormula }));
                 }
+            } else if (!enabledCurrencyTypes.length) {
+                console.log("No currency generated because all coin types are disabled.");
             } else {
                 console.log(`No currency generated for ${customLootEnabled ? token.name : creatureType} (roll ${currencyRoll.toFixed(1)} vs ${currencyChance}%)`);
             }
@@ -800,17 +1148,23 @@ const raritySummary = itemCount > 0
             if (token?.actor) {
                 console.log(`Applying loot to ${token.name}:`, loot);
                 if (loot.items.length) {
-                    token.actor.createEmbeddedDocuments("Item", loot.items)
-                        .then(() => console.log(`✅ Successfully added items to ${token.name}`))
-                        .catch(err => console.error(`❌ Error adding items:`, err));
+                    const items = loot.items.map(item => rlgPrepareItemData(item)).filter(Boolean);
+                    const dropped = loot.items.length - items.length;
+                    if (dropped > 0) console.warn(`Random Loot Generator skipped ${dropped} invalid non-Item loot result(s) for ${token.name}.`);
+                    if (items.length) {
+                        token.actor.createEmbeddedDocuments("Item", items)
+                            .then(() => console.log(`✅ Successfully added items to ${token.name}`))
+                            .catch(err => console.error(`❌ Error adding items:`, err));
+                    }
                 }
                 if (Object.values(loot.currency).some(val => val > 0)) {
-                    let currentCurrency = token.actor.system.currency || { cp: 0, sp: 0, gp: 0, pp: 0 };
+                    let currentCurrency = token.actor.system.currency || rlgEmptyCurrency();
                     let updatedCurrency = {
-                        cp: currentCurrency.cp + (loot.currency.cp || 0),
-                        sp: currentCurrency.sp + (loot.currency.sp || 0),
-                        gp: currentCurrency.gp + (loot.currency.gp || 0),
-                        pp: currentCurrency.pp + (loot.currency.pp || 0)
+                        cp: (currentCurrency.cp || 0) + (loot.currency.cp || 0),
+                        sp: (currentCurrency.sp || 0) + (loot.currency.sp || 0),
+                        ep: (currentCurrency.ep || 0) + (loot.currency.ep || 0),
+                        gp: (currentCurrency.gp || 0) + (loot.currency.gp || 0),
+                        pp: (currentCurrency.pp || 0) + (loot.currency.pp || 0)
                     };
                     token.actor.update({ "system.currency": updatedCurrency })
                         .then(() => console.log(`✅ Successfully added currency to ${token.name}`))
@@ -825,16 +1179,25 @@ const raritySummary = itemCount > 0
       if (!game.user.isGM) return; // Never show loot preview to players  
       let content = `
             <style>
-                .loot-item { display: flex; align-items: center; gap: 10px; }
-                .loot-img { width: 30px; height: 30px; border-radius: 5px; }
-                .loot-item.common { color:rgb(117, 113, 113); }
-                .loot-item.uncommon { color:rgb(3, 182, 3); }
-                .loot-item.rare { color: #0000ff; }
-                .loot-item.very-rare { color: #ff00ff; }
-                .loot-item.legendary { color:rgb(226, 157, 9); }
-                .item-link { cursor: pointer; text-decoration: underline; }
-                .item-link:hover { opacity: 0.8; }
-            </style>`;
+                .rlg-loot-preview .loot-item { display: flex; align-items: center; gap: 10px; min-height: 30px; }
+                .rlg-loot-preview .loot-img {
+                    width: 30px !important;
+                    height: 30px !important;
+                    max-width: 30px !important;
+                    max-height: 30px !important;
+                    object-fit: cover;
+                    flex: 0 0 30px;
+                    border-radius: 5px;
+                }
+                .rlg-loot-preview .loot-item.common { color:rgb(117, 113, 113); }
+                .rlg-loot-preview .loot-item.uncommon { color:rgb(3, 182, 3); }
+                .rlg-loot-preview .loot-item.rare { color: #0000ff; }
+                .rlg-loot-preview .loot-item.very-rare { color: #ff00ff; }
+                .rlg-loot-preview .loot-item.legendary { color:rgb(226, 157, 9); }
+                .rlg-loot-preview .item-link { cursor: pointer; text-decoration: underline; }
+                .rlg-loot-preview .item-link:hover { opacity: 0.8; }
+            </style>
+            <div class="rlg-loot-preview">`;
         tokens.forEach(token => {
             let loot = lootAssignments[token.id];
             let itemList = loot.items
@@ -843,7 +1206,7 @@ const raritySummary = itemCount > 0
                     const itemId = item._id || `temp-${index}`;
                     const pack = item.pack || "";
                     return `<div class="loot-item ${rarity}">
-                        <img src="${item.img}" class="loot-img">
+                        <img src="${item.img}" class="loot-img" width="30" height="30" style="width: 30px; height: 30px; max-width: 30px; max-height: 30px; object-fit: cover; flex: 0 0 30px; border-radius: 5px;">
                         <a class="item-link" data-item-id="${itemId}" data-pack="${pack}">${item.name}</a>
                     </div>`;
                 })
@@ -855,25 +1218,32 @@ const raritySummary = itemCount > 0
             let currencyText = currencyList ? `Currency: ${currencyList}` : "Currency: None";
             content += `<strong>${token.name}:</strong><br>${itemList}<br>${currencyText}<br><br>`;
         });
-        const dialog = new Dialog({
-            title: game.i18n.localize("RLG.LootPreview.Title"),
-            content: content,
-            buttons: {
-                reroll: { label: game.i18n.localize("RLG.LootPreview.Reroll"), callback: () => this.generateLootForTokens(tokens) },
-                apply: { label: game.i18n.localize("RLG.LootPreview.Apply"), callback: () => this.applyLoot(lootAssignments) }
-            },
-            render: (html) => {
-                const $html = $(html);
-                $html.find(".item-link").on("click", (event) => {
-                    const $link = $(event.currentTarget);
-                    const itemId = $link.data("item-id");
-                    const pack = $link.data("pack");
+        content += `</div>`;
+        const dialog = new RLG_DialogV2({
+            window: { title: game.i18n.localize("RLG.LootPreview.Title") },
+            content,
+            buttons: [{
+                action: "reroll",
+                label: game.i18n.localize("RLG.LootPreview.Reroll"),
+                callback: () => this.generateLootForTokens(tokens)
+            }, {
+                action: "apply",
+                label: game.i18n.localize("RLG.LootPreview.Apply"),
+                default: true,
+                callback: () => this.applyLoot(lootAssignments)
+            }]
+        });
+        dialog.addEventListener("render", () => {
+            dialog.element.querySelectorAll(".item-link").forEach(link => {
+                link.addEventListener("click", event => {
+                    const itemId = event.currentTarget.dataset.itemId;
+                    const pack = event.currentTarget.dataset.pack;
                     console.log(`Clicked item: ID=${itemId}, Pack=${pack}`);
                     this.openItemSheet(itemId, pack);
                 });
-            }
+            });
         });
-        dialog.render(true);
+        dialog.render({ force: true });
     }
 
     openItemSheet(itemId, pack = "") {
@@ -882,7 +1252,7 @@ const raritySummary = itemCount > 0
             game.packs.get(pack)?.getDocument(itemId).then(item => {
                 if (item) {
                     console.log(`Found compendium item: ${item.name}`);
-                    item.sheet.render(true);
+                    rlgRenderApplication(item.sheet);
                 } else {
                     console.warn(`Item ${itemId} not found in pack ${pack}`);
                 }
@@ -891,7 +1261,7 @@ const raritySummary = itemCount > 0
             const item = game.items.get(itemId);
             if (item) {
                 console.log(`Found world item: ${item.name}`);
-                item.sheet.render(true);
+                rlgRenderApplication(item.sheet);
             } else {
                 console.warn(`Item ${itemId} not found in world items`);
             }
@@ -899,813 +1269,940 @@ const raritySummary = itemCount > 0
     }
 
 async showCompendiumSelection() {
-  const packs = game.packs.contents.filter(p => p.metadata.type === "Item");
-  const folders = game.folders.filter(f => f.type === "Item" && f.contents.length > 0);
-  const tables = game.tables.contents;
-  let content = `<div style="max-height: 400px; overflow-y: auto;">`;
-  content += `<h3>${game.i18n.localize("RLG.CompendiumSelection.Compendiums")}</h3>`;
-  if (packs.length === 0) content += `<p>${game.i18n.localize("RLG.CompendiumSelection.NoCompendiums")}</p>`;
-  else {
-    const compendiumHtml = await Promise.all(packs.map(async pack => {
-      const count = await rlgCountPackItems(pack);
-      const checked = count > 0 && this.selectedCompendiums.includes(pack.collection) ? "checked" : "";
-      const disabled = count === 0 ? "disabled" : "";
-      const title = count === 0 ? `title="${game.i18n.localize("RLG.NoItemsFound")}"` : "";
-      return `<label style="display: inline-flex; align-items: center; gap: 6px;" ${title}>
-        <input type="checkbox" name="compendium" value="${pack.collection}" ${checked} ${disabled} style="margin: 0; cursor: ${count === 0 ? 'not-allowed' : 'default'};" ${title}>
-        <span style="vertical-align: middle;">${pack.metadata.label} (${count})</span>
-      </label><br>`;
-    }));
-    content += compendiumHtml.join("");
-  }
-  content += `<h3>${game.i18n.localize("RLG.CompendiumSelection.Folders")}</h3>`;
-  if (folders.length === 0) content += `<p>${game.i18n.localize("RLG.CompendiumSelection.NoFolders")}</p>`;
-  content += folders.map(folder => {
-    const count = rlgCountFolderItems(folder.id);
-    const checked = count > 0 && this.selectedFolders.includes(folder.id) ? "checked" : "";
-    const disabled = count === 0 ? "disabled" : "";
-    const title = count === 0 ? `title="${game.i18n.localize("RLG.NoItemsFound")}"` : "";
-    return `<label style="display: inline-flex; align-items: center; gap: 6px;" ${title}>
-      <input type="checkbox" name="folder" value="${folder.id}" ${checked} ${disabled} style="margin: 0; cursor: ${count === 0 ? 'not-allowed' : 'default'};" ${title}>
-      <span style="vertical-align: middle;">${folder.name} (${count})</span>
-    </label><br>`;
-  }).join("");
-  content += `<h3>${game.i18n.localize("RLG.CompendiumSelection.RollTables")}</h3>`;
-  if (tables.length === 0) content += `<p>${game.i18n.localize("RLG.CompendiumSelection.NoTables")}</p>`;
-  content += tables.map(table => {
-    const count = rlgCountResolvableTableRows(table);
-    const checked = count > 0 && this.selectedTables.includes(table.id) ? "checked" : "";
-    const disabled = count === 0 ? "disabled" : "";
-    const title = count === 0 ? `title="${game.i18n.localize("RLG.NoItemsFound")}"` : "";
-    return `<label style="display: inline-flex; align-items: center; gap: 6px;" ${title}>
-      <input type="checkbox" name="table" value="${table.id}" ${checked} ${disabled} style="margin: 0; cursor: ${count === 0 ? 'not-allowed' : 'default'};" ${title}>
-      <span style="vertical-align: middle;">${table.name} (${count})</span>
-    </label><br>`;
-  }).join("");
-  content += `</div>`;
-  new Dialog({
+  await rlgOpenSourceSelectionDialog({
     title: game.i18n.localize("RLG.ManageLootSources.Title"),
-    content,
-    buttons: {
-      save: {
-        icon: '<i class="fas fa-save"></i>',
-        label: game.i18n.localize("RLG.ManageLootSources.Save"),
-        callback: (html) => {
-          const $html = $(html);
-          this.selectedCompendiums = $html.find("input[name='compendium']:checked").map((_, el) => el.value).get();
-          this.selectedFolders = $html.find("input[name='folder']:checked").map((_, el) => el.value).get();
-          this.selectedTables = $html.find("input[name='table']:checked").map((_, el) => el.value).get();
-          game.settings.set(this.moduleName, "selectedCompendiums", this.selectedCompendiums.join(","));
-          game.settings.set(this.moduleName, "selectedFolders", this.selectedFolders);
-          game.settings.set(this.moduleName, "lootTables", this.selectedTables);
-          console.log("Default loot sources updated:", { compendiums: this.selectedCompendiums, folders: this.selectedFolders, tables: this.selectedTables });
-        }
-      },
-      cancel: {
-        icon: '<i class="fas fa-times"></i>',
-        label: game.i18n.localize("RLG.ManageLootSources.Cancel")
-      }
-    },
-    render: (html) => {
-      const $html = $(html);
-      $html.find('input:disabled').each((i, input) => {
-        const $input = $(input);
-        $input.attr('title', game.i18n.localize("RLG.NoItemsFound"));
-        $input.css({ cursor: 'not-allowed' });
-        const $label = $input.closest('label');
-        $label.attr('title', game.i18n.localize("RLG.NoItemsFound"));
-        $label.addClass('rlg-source--disabled');
-        rlgDebug(`Post-render - Input title: ${$input.attr('title')}, Input cursor: ${$input.css('cursor')}, Label title: ${$label.attr('title')}`);
-      });
+    selectedCompendiums: this.selectedCompendiums,
+    selectedFolders: this.selectedFolders,
+    selectedTables: this.selectedTables,
+    requireSelection: false,
+    onSave: async selected => {
+      this.selectedCompendiums = selected.compendiums;
+      this.selectedFolders = selected.folders;
+      this.selectedTables = selected.tables;
+      await game.settings.set(this.moduleName, "selectedCompendiums", this.selectedCompendiums.join(","));
+      await game.settings.set(this.moduleName, "selectedFolders", this.selectedFolders);
+      await game.settings.set(this.moduleName, "lootTables", this.selectedTables);
+      console.log("Default loot sources updated:", { compendiums: this.selectedCompendiums, folders: this.selectedFolders, tables: this.selectedTables });
     }
-  }).render(true);
+  });
 }
 }
 
-class CreatureTypeLootForm extends FormApplication {
-    static get defaultOptions() {
-        return foundry.utils.mergeObject(super.defaultOptions, {
-            width: 700,
-            height: "auto",
-            resizable: true,
-            classes: ["creature-type-loot-window"],
-            title: game.i18n.localize("RLG.CreatureTypeLoot.Title"),
-            template: "modules/random-loot-generator/creatureTypeLoot.html"
-        });
-    }
+const RLG_CREATURE_TYPES = [
+  { key: "aberration", label: "Aberration" },
+  { key: "beast", label: "Beast" },
+  { key: "celestial", label: "Celestial" },
+  { key: "construct", label: "Construct" },
+  { key: "dragon", label: "Dragon" },
+  { key: "elemental", label: "Elemental" },
+  { key: "fey", label: "Fey" },
+  { key: "fiend", label: "Fiend" },
+  { key: "giant", label: "Giant" },
+  { key: "humanoid", label: "Humanoid" },
+  { key: "monstrosity", label: "Monstrosity" },
+  { key: "ooze", label: "Ooze" },
+  { key: "plant", label: "Plant" },
+  { key: "undead", label: "Undead" }
+];
 
-    async getData() {
-        let settings = foundry.utils.duplicate(game.settings.get("random-loot-generator", "creatureTypeLoot") || {});
-        let globalMaxRarity = game.settings.get("random-loot-generator", "maxRarity") || "Legendary";
-        let globalCurrencyChance = game.settings.get("random-loot-generator", "defaultCurrencyChance") || 75;
-        let globalItemChance = 100;
-        let globalQuantityFormula = game.settings.get("random-loot-generator", "randomQuantityFormula") || "1d4";
-        let creatureTypes = [
-            { key: "aberration", label: "Aberration" },
-            { key: "beast", label: "Beast" },
-            { key: "celestial", label: "Celestial" },
-            { key: "construct", label: "Construct" },
-            { key: "dragon", label: "Dragon" },
-            { key: "elemental", label: "Elemental" },
-            { key: "fey", label: "Fey" },
-            { key: "fiend", label: "Fiend" },
-            { key: "giant", label: "Giant" },
-            { key: "humanoid", label: "Humanoid" },
-            { key: "monstrosity", label: "Monstrosity" },
-            { key: "ooze", label: "Ooze" },
-            { key: "plant", label: "Plant" },
-            { key: "undead", label: "Undead" }
-        ];
+const RLG_DEFAULT_RARITY_PERCENTAGES = {
+  "Common": 50,
+  "Uncommon": 30,
+  "Rare": 15,
+  "Very Rare": 4,
+  "Legendary": 1
+};
 
-        for (let type of creatureTypes) {
-            let typeSettings = settings[type.key] || {
-                compendiums: [],
-                folders: [],
-                tables: [],
-                quantityFormula: "",
-                maxRarity: "",
-                currencyChance: null,
-                itemChance: null
-            };
+const RLG_RARITY_LEVELS = ["Common", "Uncommon", "Rare", "Very Rare", "Legendary"];
 
-            let selectedCompendiums = Array.isArray(typeSettings.compendiums)
-                ? typeSettings.compendiums.filter(id => game.packs.get(id))
-                : [];
-            let selectedFolders = Array.isArray(typeSettings.folders)
-                ? typeSettings.folders.filter(id => game.folders.get(id))
-                : [];
-            let selectedTables = Array.isArray(typeSettings.tables)
-                ? typeSettings.tables.filter(id => game.tables.get(id))
-                : [];
+const RLG_DEFAULT_CR_BANDS = [
+  { id: "0-4", label: "CR 0-4", min: 0, max: 4, maxRarity: "Common" },
+  { id: "5-10", label: "CR 5-10", min: 5, max: 10, maxRarity: "Uncommon" },
+  { id: "11-16", label: "CR 11-16", min: 11, max: 16, maxRarity: "Rare" },
+  { id: "17-plus", label: "CR 17+", min: 17, max: null, maxRarity: "Legendary" }
+];
 
-            let quantityFormula = typeSettings.quantityFormula || "";
-            let maxRarity = typeSettings.maxRarity || "";
-            let currencyChance = typeSettings.currencyChance !== null ? typeSettings.currencyChance : "";
-            let itemChance = typeSettings.itemChance !== null ? typeSettings.itemChance : "";
-
-            let totalSources = selectedCompendiums.length + selectedFolders.length + selectedTables.length;
-            type.selectedLabel = totalSources > 0 ? `Custom [${totalSources}]` : game.i18n.localize("RLG.CompendiumSelection.DefaultLabel");
-            type.quantityFormula = quantityFormula;
-            type.maxRarity = maxRarity;
-            type.currencyChance = currencyChance;
-            type.itemChance = itemChance;
-            type.totalSources = totalSources;
-
-            settings[type.key] = {
-                compendiums: selectedCompendiums,
-                folders: selectedFolders,
-                tables: selectedTables,
-                quantityFormula,
-                maxRarity,
-                currencyChance,
-                itemChance
-            };
-        }
-
-        await game.settings.set("random-loot-generator", "creatureTypeLoot", settings);
-        console.log("Rendering creature types:", creatureTypes);
-        return { creatureTypes, globalMaxRarity, globalCurrencyChance, globalItemChance, globalQuantityFormula };
-    }
-
-    activateListeners(html) {
-        super.activateListeners(html);
-        const $html = $(html);
-
-        const focusNextField = (currentInput) => {
-            const inputs = Array.from($html.find("input, select, button"));
-            const currentIndex = inputs.indexOf(currentInput[0]);
-            const nextIndex = (currentIndex + 1) % inputs.length;
-            if (inputs[nextIndex]) inputs[nextIndex].focus();
-        };
-
-        const debouncedRender = foundry.utils.debounce(() => {
-            const activeElement = document.activeElement;
-            const inputs = Array.from($html.find("input, select, button"));
-            const activeIndex = inputs.indexOf(activeElement);
-            this.render();
-            requestAnimationFrame(() => {
-                const newInputs = this.element.find("input, select, button");
-                if (activeIndex >= 0 && newInputs[activeIndex]) newInputs[activeIndex].focus();
-            });
-        }, 100);
-
-        $html.find(".quantity-input").on("change keydown", async (event) => {
-            const creatureType = event.currentTarget.dataset.creatureType;
-            const newFormula = event.currentTarget.value.trim();
-            const $currentInput = $(event.currentTarget);
-
-            if (event.type === "keydown" && event.key === "Tab") {
-                event.preventDefault();
-                focusNextField($currentInput);
-                return;
-            }
-
-            if (event.type === "keydown" && event.key === "Enter") {
-                event.preventDefault();
-            } else if (event.type !== "change") {
-                return;
-            }
-
-            const quantityRegex = /^(\d+d\d+([+-]\d+)?|\d+)$/;
-            if (newFormula && !quantityRegex.test(newFormula)) {
-                ui.notifications.warn(game.i18n.format("RLG.Notification.InvalidQuantity", { formula: newFormula }));
-                return;
-            }
-
-            let settings = foundry.utils.duplicate(game.settings.get("random-loot-generator", "creatureTypeLoot") || {});
-            settings[creatureType] = settings[creatureType] || {
-                compendiums: [],
-                folders: [],
-                tables: [],
-                quantityFormula: "",
-                maxRarity: "",
-                currencyChance: null,
-                itemChance: null
-            };
-            settings[creatureType].quantityFormula = newFormula;
-            await game.settings.set("random-loot-generator", "creatureTypeLoot", settings);
-            console.log(`Updated ${creatureType} quantityFormula to: ${newFormula}`);
-            debouncedRender();
-        });
-
-        $html.find(".item-chance-input").on("change keydown", async (event) => {
-            const creatureType = event.currentTarget.dataset.creatureType;
-            const newChance = event.currentTarget.value.trim() === "" || parseInt(event.currentTarget.value) === 0 ? null : parseInt(event.currentTarget.value);
-            const $currentInput = $(event.currentTarget);
-
-            if (event.type === "keydown" && event.key === "Tab") {
-                event.preventDefault();
-                focusNextField($currentInput);
-                return;
-            }
-
-            if (event.type === "keydown" && event.key === "Enter") {
-                event.preventDefault();
-            } else if (event.type !== "change") {
-                return;
-            }
-
-            let settings = foundry.utils.duplicate(game.settings.get("random-loot-generator", "creatureTypeLoot") || {});
-            settings[creatureType] = settings[creatureType] || {
-                compendiums: [],
-                folders: [],
-                tables: [],
-                quantityFormula: "",
-                maxRarity: "",
-                currencyChance: null,
-                itemChance: null
-            };
-            settings[creatureType].itemChance = newChance;
-            await game.settings.set("random-loot-generator", "creatureTypeLoot", settings);
-            console.log(`Updated ${creatureType} itemChance to: ${newChance === null ? "[Global]" : newChance + "%"}`);
-            debouncedRender();
-        });
-
-        $html.find(".currency-chance-input").on("change keydown", async (event) => {
-            const creatureType = event.currentTarget.dataset.creatureType;
-            const newChance = event.currentTarget.value.trim() === "" || parseInt(event.currentTarget.value) === 0 ? null : parseInt(event.currentTarget.value);
-            const $currentInput = $(event.currentTarget);
-
-            if (event.type === "keydown" && event.key === "Tab") {
-                event.preventDefault();
-                focusNextField($currentInput);
-                return;
-            }
-
-            if (event.type === "keydown" && event.key === "Enter") {
-                event.preventDefault();
-            } else if (event.type !== "change") {
-                return;
-            }
-
-            let settings = foundry.utils.duplicate(game.settings.get("random-loot-generator", "creatureTypeLoot") || {});
-            settings[creatureType] = settings[creatureType] || {
-                compendiums: [],
-                folders: [],
-                tables: [],
-                quantityFormula: "",
-                maxRarity: "",
-                currencyChance: null,
-                itemChance: null
-            };
-            settings[creatureType].currencyChance = newChance;
-            await game.settings.set("random-loot-generator", "creatureTypeLoot", settings);
-            console.log(`Updated ${creatureType} currencyChance to: ${newChance === null ? "[Global]" : newChance + "%"}`);
-            debouncedRender();
-        });
-
-        $html.find(".rarity-select").on("change keydown", async (event) => {
-            const creatureType = event.currentTarget.dataset.creatureType;
-            const newRarity = event.currentTarget.value;
-            const $currentInput = $(event.currentTarget);
-
-            if (event.type === "keydown" && event.key === "Tab") {
-                event.preventDefault();
-                focusNextField($currentInput);
-                return;
-            }
-
-            if (event.type === "keydown" && event.key === "Enter") {
-                event.preventDefault();
-            } else if (event.type !== "change") {
-                return;
-            }
-
-            let settings = foundry.utils.duplicate(game.settings.get("random-loot-generator", "creatureTypeLoot") || {});
-            settings[creatureType] = settings[creatureType] || {
-                compendiums: [],
-                folders: [],
-                tables: [],
-                quantityFormula: "",
-                maxRarity: "",
-                currencyChance: null,
-                itemChance: null
-            };
-            settings[creatureType].maxRarity = newRarity;
-            await game.settings.set("random-loot-generator", "creatureTypeLoot", settings);
-            console.log(`Updated ${creatureType} maxRarity to: ${newRarity || "[Global]"}`);
-            debouncedRender();
-        });
-
-$html.find(".compendium-select-btn").click(async (event) => {
-  const button = $(event.currentTarget);
-  const creatureType = button.data("creature-type");
-  if (!creatureType) {
-    console.error("No creature type specified for compendium selection button.");
-    ui.notifications.error(game.i18n.localize("RLG.Notification.NoCreatureType"));
-    return;
-  }
-  let creatureTypeLoot = game.settings.get("random-loot-generator", "creatureTypeLoot") || {};
-  let typeSettings = creatureTypeLoot[creatureType] || {
-    compendiums: [],
-    folders: [],
-    tables: [],
+function rlgDefaultCrBandSettings(band) {
+  return {
+    id: band.id,
+    label: band.label,
+    min: band.min,
+    max: band.max,
     quantityFormula: "",
-    maxRarity: "",
-    currencyChance: null,
-    itemChance: null
+    itemChance: null,
+    maxRarity: band.maxRarity || ""
   };
-  let selectedCompendiums = Array.isArray(typeSettings.compendiums) ? typeSettings.compendiums : [];
-  let selectedFolders = Array.isArray(typeSettings.folders) ? typeSettings.folders : [];
-  let selectedTables = Array.isArray(typeSettings.tables) ? typeSettings.tables : [];
-  const packs = game.packs.contents.filter(p => p.metadata.type === "Item");
-  const folders = game.folders.filter(f => f.type === "Item" && f.contents.length > 0);
-  const tables = game.tables.contents;
-  let content = `<div style="max-height: 400px; overflow-y: auto;">`;
-  content += `<h3>${game.i18n.localize("RLG.CompendiumSelection.Compendiums")}</h3>`;
-  if (packs.length === 0) content += `<p>${game.i18n.localize("RLG.CompendiumSelection.NoCompendiums")}</p>`;
-  else {
-    const compendiumHtml = await Promise.all(packs.map(async pack => {
-      const count = await rlgCountPackItems(pack);
-      const checked = count > 0 && selectedCompendiums.includes(pack.collection) ? "checked" : "";
-      const disabled = count === 0 ? "disabled" : "";
-      const title = count === 0 ? `title="${game.i18n.localize("RLG.NoItemsFound")}"` : "";
-      return `<label style="display: inline-flex; align-items: center; gap: 6px;" ${title}>
-        <input type="checkbox" name="compendium" value="${pack.collection}" ${checked} ${disabled} style="margin: 0;">
-        <span style="vertical-align: middle;">${pack.metadata.label} (${count})</span>
-      </label><br>`;
-    }));
-    content += compendiumHtml.join("");
-  }
-  content += `<h3>${game.i18n.localize("RLG.CompendiumSelection.Folders")}</h3>`;
-  if (folders.length === 0) content += `<p>${game.i18n.localize("RLG.CompendiumSelection.NoFolders")}</p>`;
-  content += folders.map(folder => {
-    const count = rlgCountFolderItems(folder.id);
-    const checked = count > 0 && selectedFolders.includes(folder.id) ? "checked" : "";
-    const disabled = count === 0 ? "disabled" : "";
-    const title = count === 0 ? `title="${game.i18n.localize("RLG.NoItemsFound")}"` : "";
-    return `<label style="display: inline-flex; align-items: center; gap: 6px;" ${title}>
-      <input type="checkbox" name="folder" value="${folder.id}" ${checked} ${disabled} style="margin: 0;">
-      <span style="vertical-align: middle;">${folder.name} (${count})</span>
-    </label><br>`;
-  }).join("");
-  content += `<h3>${game.i18n.localize("RLG.CompendiumSelection.RollTables")}</h3>`;
-  if (tables.length === 0) content += `<p>${game.i18n.localize("RLG.CompendiumSelection.NoTables")}</p>`;
-  content += tables.map(table => {
-    const count = rlgCountResolvableTableRows(table);
-    const checked = count > 0 && selectedTables.includes(table.id) ? "checked" : "";
-    const disabled = count === 0 ? "disabled" : "";
-    const title = count === 0 ? `title="${game.i18n.localize("RLG.NoItemsFound")}"` : "";
-    return `<label style="display: inline-flex; align-items: center; gap: 6px;" ${title}>
-      <input type="checkbox" name="table" value="${table.id}" ${checked} ${disabled} style="margin: 0;">
-      <span style="vertical-align: middle;">${table.name} (${count})</span>
-    </label><br>`;
-  }).join("");
-  content += `</div>`;
-  new Dialog({
-    title: game.i18n.format("RLG.CompendiumSelection.TitleFor", { creatureType }),
-    content,
-    buttons: {
-      save: {
-        icon: '<i class="fas fa-save"></i>',
-        label: game.i18n.localize("RLG.ManageLootSources.Save"),
-        callback: async (dialogHtml) => {
-          const selectedComps = dialogHtml.find("input[name='compendium']:checked").map((_, el) => el.value).get();
-          const selectedFolds = dialogHtml.find("input[name='folder']:checked").map((_, el) => el.value).get();
-          const selectedTabs = dialogHtml.find("input[name='table']:checked").map((_, el) => el.value).get();
-          if (!selectedComps.length && !selectedFolds.length && !selectedTabs.length) {
-            ui.notifications.warn(game.i18n.localize("RLG.Notification.SelectAtLeastOneSource"));
-            return;
-          }
-          let settings = foundry.utils.duplicate(game.settings.get("random-loot-generator", "creatureTypeLoot") || {});
-          settings[creatureType] = {
-            compendiums: selectedComps,
-            folders: selectedFolds,
-            tables: selectedTabs,
-            quantityFormula: typeSettings.quantityFormula || "",
-            maxRarity: typeSettings.maxRarity || "",
-            currencyChance: typeSettings.currencyChance ?? null,
-            itemChance: typeSettings.itemChance ?? null
-          };
-          await game.settings.set("random-loot-generator", "creatureTypeLoot", settings);
-          console.log(`Updated ${creatureType} sources:`, settings[creatureType]);
-          this.render();
-        }
-      },
-      cancel: {
-        icon: '<i class="fas fa-ban"></i>',
-        label: game.i18n.localize("RLG.ManageLootSources.Cancel"),
-        callback: () => console.log(`Cancelled source selection for ${creatureType}`)
-      }
-    },
-    default: "save"
-  }).render(true);
-});
-
-        $html.find(".reset-defaults").click(async () => {
-            new Dialog({
-                title: game.i18n.localize("RLG.ResetConfirm.Title"),
-                content: `<p>${game.i18n.localize("RLG.Notification.ResetConfirm")}</p>`,
-                buttons: {
-                    cancel: {
-                        label: game.i18n.localize("RLG.ManageLootSources.Cancel"),
-                        icon: '<i class="fas fa-ban"></i>',
-                        callback: () => console.log("Reset canceled")
-                    },
-                    reset: {
-                        label: game.i18n.localize("RLG.ResetConfirm.Reset"),
-                        icon: '<i class="fas fa-repeat"></i>',
-                        callback: async () => {
-                            await game.settings.set("random-loot-generator", "creatureTypeLoot", {});
-                            ui.notifications.info(game.i18n.localize("RLG.Notification.ResetSuccess"));
-                            this.render();
-                        }
-                    }
-                },
-                default: "cancel"
-            }).render(true);
-        });
-
-        $html.find(".export-sources").click(this.exportSources.bind(this));
-        $html.find(".import-sources").click(this.importSources.bind(this));
-    }
-
-    exportSources() {
-        const settings = {
-            selectedCompendiums: game.settings.get("random-loot-generator", "selectedCompendiums"),
-            selectedFolders: game.settings.get("random-loot-generator", "selectedFolders"),
-            lootTables: game.settings.get("random-loot-generator", "lootTables"),
-            creatureTypeLoot: game.settings.get("random-loot-generator", "creatureTypeLoot")
-        };
-        const json = JSON.stringify(settings, null, 2);
-        const blob = new Blob([json], { type: "application/json" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "random-loot-generator-sources.json";
-        a.click();
-        URL.revokeObjectURL(url);
-    }
-
-    importSources() {
-        const input = document.createElement("input");
-        input.type = "file";
-        input.accept = ".json";
-        input.onchange = async (event) => {
-            const file = event.target.files[0];
-            if (file) {
-                const reader = new FileReader();
-                reader.onload = async (e) => {
-                    try {
-                        const settings = JSON.parse(e.target.result);
-                        await game.settings.set("random-loot-generator", "selectedCompendiums", settings.selectedCompendiums || "");
-                        await game.settings.set("random-loot-generator", "selectedFolders", settings.selectedFolders || []);
-                        await game.settings.set("random-loot-generator", "lootTables", settings.lootTables || []);
-                        await game.settings.set("random-loot-generator", "creatureTypeLoot", settings.creatureTypeLoot || {});
-                        game.lootGenerator.selectedCompendiums = settings.selectedCompendiums ? settings.selectedCompendiums.split(",").map(comp => comp.trim()).filter(comp => comp) : [];
-                        game.lootGenerator.selectedFolders = settings.selectedFolders || [];
-                        game.lootGenerator.selectedTables = settings.lootTables || [];
-                        ui.notifications.info(game.i18n.localize("RLG.Notification.SourcesImported"));
-                        this.render();
-                    } catch (error) {
-                        ui.notifications.error(game.i18n.localize("RLG.Notification.ImportFailed"));
-                        console.error("Import error:", error);
-                    }
-                };
-                reader.readAsText(file);
-            }
-        };
-        input.click();
-    }
 }
 
-class TokenLootSettingsForm extends FormApplication {
-    constructor(actor, creatureType) {
-        super();
-        this.actor = actor;
-        this.creatureType = creatureType;
-    }
-
-    static get defaultOptions() {
-        return foundry.utils.mergeObject(super.defaultOptions, {
-            width: 600,
-            height: "auto",
-            resizable: true,
-            classes: ["token-loot-settings-window"],
-            title: game.i18n.localize("RLG.TokenLootSettings.Title"),
-            template: "modules/random-loot-generator/tokenLootSettings.html"
-        });
-    }
-
-    async getData() {
-        const lootSettings = (await this.actor.getFlag("random-loot-generator", "lootSettings")) || {};
-        const creatureLootSettings = game.settings.get("random-loot-generator", "creatureTypeLoot") || {};
-        const typeSettings = creatureLootSettings[this.creatureType] || {};
-
-        return {
-            compendiums: lootSettings.compendiums || typeSettings.compendiums || [],
-            folders: lootSettings.folders || typeSettings.folders || [],
-            tables: lootSettings.tables || typeSettings.tables || [],
-            quantityFormula: lootSettings.quantityFormula || typeSettings.quantityFormula || "",
-            maxRarity: lootSettings.maxRarity || typeSettings.maxRarity || "",
-            itemChance: lootSettings.itemChance !== null && lootSettings.itemChance !== undefined ? lootSettings.itemChance : typeSettings.itemChance !== null ? typeSettings.itemChance : "",
-            currencyChance: lootSettings.currencyChance !== null && lootSettings.currencyChance !== undefined ? lootSettings.currencyChance : typeSettings.currencyChance !== null ? typeSettings.currencyChance : "",
-            globalQuantityFormula: game.settings.get("random-loot-generator", "randomQuantityFormula") || "1d4",
-            globalMaxRarity: game.settings.get("random-loot-generator", "maxRarity") || "Legendary",
-            globalItemChance: 100,
-            globalCurrencyChance: game.settings.get("random-loot-generator", "defaultCurrencyChance") || 75,
-            totalSources: (lootSettings.compendiums?.length || 0) + (lootSettings.folders?.length || 0) + (lootSettings.tables?.length || 0)
-        };
-    }
-
-    activateListeners(html) {
-        super.activateListeners(html);
-        const $html = $(html);
-
-        const focusNextField = (currentInput) => {
-            const inputs = Array.from($html.find("input, select, button"));
-            const currentIndex = inputs.indexOf(currentInput[0]);
-            const nextIndex = (currentIndex + 1) % inputs.length;
-            if (inputs[nextIndex]) inputs[nextIndex].focus();
-        };
-
-        $html.find(".quantity-input").on("change keydown", async (event) => {
-            const newFormula = event.currentTarget.value.trim();
-            const $currentInput = $(event.currentTarget);
-
-            if (event.type === "keydown" && event.key === "Tab") {
-                event.preventDefault();
-                focusNextField($currentInput);
-                return;
-            }
-
-            if (event.type === "keydown" && event.key === "Enter") {
-                event.preventDefault();
-            } else if (event.type !== "change") {
-                return;
-            }
-
-            const quantityRegex = /^(\d+d\d+([+-]\d+)?|\d+)$/;
-            if (newFormula && !quantityRegex.test(newFormula)) {
-                ui.notifications.warn(game.i18n.format("RLG.Notification.InvalidQuantity", { formula: newFormula }));
-                return;
-            }
-
-            let settings = (await this.actor.getFlag("random-loot-generator", "lootSettings")) || {};
-            settings.quantityFormula = newFormula;
-            await this.actor.setFlag("random-loot-generator", "lootSettings", settings);
-            await this.actor.setFlag("random-loot-generator", "customLootEnabled", true);
-            console.log(`Updated token quantityFormula to: ${newFormula}`);
-            this.render();
-        });
-
-        $html.find(".item-chance-input").on("change keydown", async (event) => {
-            const newChance = event.currentTarget.value.trim() === "" || parseInt(event.currentTarget.value) === 0 ? null : parseInt(event.currentTarget.value);
-            const $currentInput = $(event.currentTarget);
-
-            if (event.type === "keydown" && event.key === "Tab") {
-                event.preventDefault();
-                focusNextField($currentInput);
-                return;
-            }
-
-            if (event.type === "keydown" && event.key === "Enter") {
-                event.preventDefault();
-            } else if (event.type !== "change") {
-                return;
-            }
-
-            let settings = (await this.actor.getFlag("random-loot-generator", "lootSettings")) || {};
-            settings.itemChance = newChance;
-            await this.actor.setFlag("random-loot-generator", "lootSettings", settings);
-            await this.actor.setFlag("random-loot-generator", "customLootEnabled", true);
-            console.log(`Updated token itemChance to: ${newChance === null ? "[Global]" : newChance + "%"}`);
-            this.render();
-        });
-
-        $html.find(".currency-chance-input").on("change keydown", async (event) => {
-            const newChance = event.currentTarget.value.trim() === "" || parseInt(event.currentTarget.value) === 0 ? null : parseInt(event.currentTarget.value);
-            const $currentInput = $(event.currentTarget);
-
-            if (event.type === "keydown" && event.key === "Tab") {
-                event.preventDefault();
-                focusNextField($currentInput);
-                return;
-            }
-
-            if (event.type === "keydown" && event.key === "Enter") {
-                event.preventDefault();
-            } else if (event.type !== "change") {
-                return;
-            }
-
-            let settings = (await this.actor.getFlag("random-loot-generator", "lootSettings")) || {};
-            settings.currencyChance = newChance;
-            await this.actor.setFlag("random-loot-generator", "lootSettings", settings);
-            await this.actor.setFlag("random-loot-generator", "customLootEnabled", true);
-            console.log(`Updated token currencyChance to: ${newChance === null ? "[Global]" : newChance + "%"}`);
-            this.render();
-        });
-
-        $html.find(".rarity-select").on("change keydown", async (event) => {
-            const newRarity = event.currentTarget.value;
-            const $currentInput = $(event.currentTarget);
-
-            if (event.type === "keydown" && event.key === "Tab") {
-                event.preventDefault();
-                focusNextField($currentInput);
-                return;
-            }
-
-            if (event.type === "keydown" && event.key === "Enter") {
-                event.preventDefault();
-            } else if (event.type !== "change") {
-                return;
-            }
-
-            let settings = (await this.actor.getFlag("random-loot-generator", "lootSettings")) || {};
-            settings.maxRarity = newRarity;
-            await this.actor.setFlag("random-loot-generator", "lootSettings", settings);
-            await this.actor.setFlag("random-loot-generator", "customLootEnabled", true);
-            console.log(`Updated token maxRarity to: ${newRarity || "[Global]"}`);
-            this.render();
-        });
-
-$html.find(".compendium-select-btn").click(async (event) => {
-  const button = $(event.currentTarget);
-  let settings = (await this.actor.getFlag("random-loot-generator", "lootSettings")) || {};
-  let selectedCompendiums = settings.compendiums || [];
-  let selectedFolders = settings.folders || [];
-  let selectedTables = settings.tables || [];
-  const packs = game.packs.contents.filter(p => p.metadata.type === "Item");
-  const folders = game.folders.filter(f => f.type === "Item" && f.contents.length > 0);
-  const tables = game.tables.contents;
-  let content = `<div style="max-height: 400px; overflow-y: auto;">`;
-  content += `<h3>${game.i18n.localize("RLG.CompendiumSelection.Compendiums")}</h3>`;
-  if (packs.length === 0) content += `<p>${game.i18n.localize("RLG.CompendiumSelection.NoCompendiums")}</p>`;
-  else {
-    const compendiumHtml = await Promise.all(packs.map(async pack => {
-      const count = await rlgCountPackItems(pack);
-      const checked = count > 0 && selectedCompendiums.includes(pack.collection) ? "checked" : "";
-      const disabled = count === 0 ? "disabled" : "";
-      const title = count === 0 ? `title="${game.i18n.localize("RLG.NoItemsFound")}"` : "";
-      return `<label style="display: inline-flex; align-items: center; gap: 6px;" ${title}>
-        <input type="checkbox" name="compendium" value="${pack.collection}" ${checked} ${disabled} style="margin: 0;">
-        <span style="vertical-align: middle;">${pack.metadata.label} (${count})</span>
-      </label><br>`;
-    }));
-    content += compendiumHtml.join("");
-  }
-  content += `<h3>${game.i18n.localize("RLG.CompendiumSelection.Folders")}</h3>`;
-  if (folders.length === 0) content += `<p>${game.i18n.localize("RLG.CompendiumSelection.NoFolders")}</p>`;
-  content += folders.map(folder => {
-    const count = rlgCountFolderItems(folder.id);
-    const checked = count > 0 && selectedFolders.includes(folder.id) ? "checked" : "";
-    const disabled = count === 0 ? "disabled" : "";
-    const title = count === 0 ? `title="${game.i18n.localize("RLG.NoItemsFound")}"` : "";
-    return `<label style="display: inline-flex; align-items: center; gap: 6px;" ${title}>
-      <input type="checkbox" name="folder" value="${folder.id}" ${checked} ${disabled} style="margin: 0;">
-      <span style="vertical-align: middle;">${folder.name} (${count})</span>
-    </label><br>`;
-  }).join("");
-  content += `<h3>${game.i18n.localize("RLG.CompendiumSelection.RollTables")}</h3>`;
-  if (tables.length === 0) content += `<p>${game.i18n.localize("RLG.CompendiumSelection.NoTables")}</p>`;
-  content += tables.map(table => {
-    const count = rlgCountResolvableTableRows(table);
-    const checked = count > 0 && selectedTables.includes(table.id) ? "checked" : "";
-    const disabled = count === 0 ? "disabled" : "";
-    const title = count === 0 ? `title="${game.i18n.localize("RLG.NoItemsFound")}"` : "";
-    return `<label style="display: inline-flex; align-items: center; gap: 6px;" ${title}>
-      <input type="checkbox" name="table" value="${table.id}" ${checked} ${disabled} style="margin: 0;">
-      <span style="vertical-align: middle;">${table.name} (${count})</span>
-    </label><br>`;
-  }).join("");
-  content += `</div>`;
-  new Dialog({
-    title: game.i18n.format("RLG.TokenLootSettings.TitleFor", { name: this.actor.name }),
-    content,
-    buttons: {
-      save: {
-        icon: '<i class="fas fa-save"></i>',
-        label: game.i18n.localize("RLG.ManageLootSources.Save"),
-        callback: async (dialogHtml) => {
-          const selectedComps = dialogHtml.find("input[name='compendium']:checked").map((_, el) => el.value).get();
-          const selectedFolds = dialogHtml.find("input[name='folder']:checked").map((_, el) => el.value).get();
-          const selectedTabs = dialogHtml.find("input[name='table']:checked").map((_, el) => el.value).get();
-          if (!selectedComps.length && !selectedFolds.length && !selectedTabs.length) {
-            ui.notifications.warn(game.i18n.localize("RLG.Notification.SelectAtLeastOneSource"));
-            return;
-          }
-          settings.compendiums = selectedComps;
-          settings.folders = selectedFolds;
-          settings.tables = selectedTabs;
-          await this.actor.setFlag("random-loot-generator", "lootSettings", settings);
-          await this.actor.setFlag("random-loot-generator", "customLootEnabled", true);
-          console.log(`Updated token loot sources for ${this.actor.name}:`, settings);
-          this.render();
-        }
-      },
-      cancel: {
-        icon: '<i class="fas fa-ban"></i>',
-        label: game.i18n.localize("RLG.ManageLootSources.Cancel"),
-        callback: () => console.log(`Cancelled source selection for ${this.actor.name}`)
-      }
-    },
-    default: "save"
-  }).render(true);
-});
-    }
+function rlgEmptyCrBandOverride(band) {
+  return {
+    id: band.id,
+    label: band.label,
+    min: band.min,
+    max: band.max,
+    quantityFormula: "",
+    itemChance: null,
+    maxRarity: ""
+  };
 }
 
-class RarityPercentagesForm extends FormApplication {
-    static get defaultOptions() {
-        return foundry.utils.mergeObject(super.defaultOptions, {
-            width: 400,
-            height: "auto",
-            resizable: true,
-            classes: ["rarity-percentages-window"],
-            title: game.i18n.localize("RLG.RarityPercentages.Title"),
-            template: "modules/random-loot-generator/rarityPercentages.html"
-        });
+function rlgDefaultCrLootSettings() {
+  return {
+    fallback: {
+      quantityFormula: "",
+      itemChance: 100
+    },
+    bands: Object.fromEntries(RLG_DEFAULT_CR_BANDS.map(band => [band.id, rlgDefaultCrBandSettings(band)])),
+    creatureTypes: {}
+  };
+}
+
+function rlgNormalizeItemChance(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.min(100, Math.max(0, Math.round(n)));
+}
+
+function rlgNormalizeCrBandSettings(band, value = {}, { defaults = true } = {}) {
+  const base = defaults ? rlgDefaultCrBandSettings(band) : rlgEmptyCrBandOverride(band);
+  return {
+    ...base,
+    ...value,
+    id: band.id,
+    label: band.label,
+    min: band.min,
+    max: band.max,
+    quantityFormula: typeof value.quantityFormula === "string" ? value.quantityFormula.trim() : base.quantityFormula,
+    itemChance: rlgNormalizeItemChance(value.itemChance),
+    maxRarity: RLG_RARITY_LEVELS.includes(value.maxRarity) ? value.maxRarity : base.maxRarity
+  };
+}
+
+function rlgNormalizeCrLootSettings(settings = {}) {
+  const defaults = rlgDefaultCrLootSettings();
+  const normalized = {
+    fallback: {
+      ...defaults.fallback,
+      ...(settings.fallback || {}),
+      quantityFormula: typeof settings.fallback?.quantityFormula === "string" ? settings.fallback.quantityFormula.trim() : defaults.fallback.quantityFormula,
+      itemChance: rlgNormalizeItemChance(settings.fallback?.itemChance) ?? defaults.fallback.itemChance
+    },
+    bands: {},
+    creatureTypes: {}
+  };
+
+  for (const band of RLG_DEFAULT_CR_BANDS) {
+    normalized.bands[band.id] = rlgNormalizeCrBandSettings(band, settings.bands?.[band.id], { defaults: true });
+  }
+
+  for (const type of RLG_CREATURE_TYPES) {
+    const raw = settings.creatureTypes?.[type.key] || {};
+    normalized.creatureTypes[type.key] = { bands: {} };
+    for (const band of RLG_DEFAULT_CR_BANDS) {
+      normalized.creatureTypes[type.key].bands[band.id] = rlgNormalizeCrBandSettings(band, raw.bands?.[band.id], { defaults: false });
+    }
+  }
+
+  return normalized;
+}
+
+function rlgParseChallengeRating(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const text = String(value).trim();
+  if (!text) return null;
+  if (text.includes("/")) {
+    const [num, den] = text.split("/").map(part => Number(part.trim()));
+    return Number.isFinite(num) && Number.isFinite(den) && den !== 0 ? num / den : null;
+  }
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function rlgFindCrBand(cr) {
+  if (!Number.isFinite(cr)) return null;
+  return RLG_DEFAULT_CR_BANDS.find(band => cr >= band.min && (band.max === null || cr <= band.max)) || null;
+}
+
+function rlgHasTuningValue(value) {
+  return value !== null && value !== undefined && value !== "";
+}
+
+function rlgSettingPercent(value, fallback) {
+  if (!rlgHasTuningValue(value)) return fallback;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : fallback;
+}
+
+function rlgResolveCurrencyChance(typeSettings = {}, lootSettings = {}, customLootEnabled = false) {
+  let chance = rlgSettingPercent(game.settings.get(RLG_MODULE_ID, "defaultCurrencyChance"), 75);
+  chance = rlgSettingPercent(typeSettings.currencyChance, chance);
+  if (customLootEnabled) chance = rlgSettingPercent(lootSettings.currencyChance, chance);
+  return chance;
+}
+
+function rlgCrBandHasOverride(settings = {}) {
+  return rlgHasTuningValue(settings.quantityFormula)
+    || rlgHasTuningValue(settings.itemChance)
+    || rlgHasTuningValue(settings.maxRarity);
+}
+
+function rlgApplyItemTuning(target, source = {}) {
+  if (rlgHasTuningValue(source.quantityFormula)) target.quantityFormula = source.quantityFormula;
+  if (rlgHasTuningValue(source.itemChance)) target.itemChance = source.itemChance;
+  if (rlgHasTuningValue(source.maxRarity)) target.maxRarity = source.maxRarity;
+  return target;
+}
+
+function rlgResolveItemTuning({ creatureType, token, typeSettings = {}, lootSettings = {}, customLootEnabled = false }) {
+  const crSettings = rlgNormalizeCrLootSettings(game.settings.get(RLG_MODULE_ID, "crLootSettings") || {});
+  const fallback = crSettings.fallback || {};
+  const tuning = {
+    quantityFormula: fallback.quantityFormula || game.settings.get(RLG_MODULE_ID, "randomQuantityFormula") || "1d4",
+    itemChance: rlgHasTuningValue(fallback.itemChance) ? fallback.itemChance : 100,
+    maxRarity: game.settings.get(RLG_MODULE_ID, "maxRarity") || "Legendary"
+  };
+
+  rlgApplyItemTuning(tuning, typeSettings);
+
+  const crScalingEnabled = game.settings.get(RLG_MODULE_ID, "enableCRBasedItems");
+  const cr = rlgParseChallengeRating(token?.actor?.system?.details?.cr);
+  const band = rlgFindCrBand(cr);
+  const creatureCrSettings = crSettings.creatureTypes?.[creatureType];
+  if (crScalingEnabled && band) {
+    rlgApplyItemTuning(tuning, crSettings.bands?.[band.id]);
+    rlgApplyItemTuning(tuning, creatureCrSettings?.bands?.[band.id]);
+    rlgDebug("Applied CR item scaling", { creatureType, cr, band: band.id, tuning });
+  }
+
+  if (customLootEnabled) rlgApplyItemTuning(tuning, lootSettings);
+  return tuning;
+}
+
+const RLG_EXPORTABLE_SETTINGS = [
+  "enableLootPreview",
+  "enableAutoLoot",
+  "randomQuantityFormula",
+  "debugLogging",
+  "maxRarity",
+  "selectedCompendiums",
+  "selectedFolders",
+  "lootTables",
+  "creatureTypeLoot",
+  "rarityPercentages",
+  "enableCRBasedItems",
+  "crLootSettings",
+  "useCRBasedCurrency",
+  "defaultCurrencyChance",
+  "currencyFormula",
+  "enabledCurrencyTypes"
+];
+
+function rlgExportAllSettings() {
+  const settings = {};
+  for (const key of RLG_EXPORTABLE_SETTINGS) {
+    try {
+      settings[key] = game.settings.get(RLG_MODULE_ID, key);
+    } catch (e) {
+      rlgDebug("Skipping setting export", key, e);
+    }
+  }
+
+  const json = JSON.stringify({
+    module: RLG_MODULE_ID,
+    version: game.modules.get(RLG_MODULE_ID)?.version || "",
+    exportedAt: new Date().toISOString(),
+    settings
+  }, null, 2);
+  const blob = new Blob([json], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "random-loot-generator-settings.json";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function rlgImportAllSettingsFromFile(file) {
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const payload = JSON.parse(text);
+    const settings = payload.settings || payload;
+    if (!settings || typeof settings !== "object") throw new Error("Invalid settings payload");
+
+    for (const key of RLG_EXPORTABLE_SETTINGS) {
+      if (Object.prototype.hasOwnProperty.call(settings, key)) {
+        await game.settings.set(RLG_MODULE_ID, key, settings[key]);
+      }
     }
 
-    getData() {
-        let percentages = game.settings.get("random-loot-generator", "rarityPercentages") || {
-            "Common": 50,
-            "Uncommon": 30,
-            "Rare": 15,
-            "Very Rare": 4,
-            "Legendary": 1
-        };
-        return { percentages };
+    if (game.lootGenerator) {
+      game.lootGenerator.lootPreviewEnabled = game.settings.get(RLG_MODULE_ID, "enableLootPreview");
+      game.lootGenerator.selectedCompendiums = rlgNormalizeCompendiumSetting(game.settings.get(RLG_MODULE_ID, "selectedCompendiums"));
+      game.lootGenerator.selectedFolders = game.settings.get(RLG_MODULE_ID, "selectedFolders") || [];
+      game.lootGenerator.selectedTables = game.settings.get(RLG_MODULE_ID, "lootTables") || [];
     }
 
-    activateListeners(html) {
-        super.activateListeners(html);
-        const $html = $(html);
-        $html.find(".save-percentages").off("click").on("click", this._onSave.bind(this));
-        $html.find(".restore-defaults").off("click").on("click", this._onRestoreDefaults.bind(this));
+    ui.notifications.info(rlgLocalize("RLG.Notification.SettingsImported"));
+  } catch (error) {
+    ui.notifications.error(rlgLocalize("RLG.Notification.SettingsImportFailed"));
+    console.error("Random Loot Generator settings import failed:", error);
+  }
+}
+
+class CrItemScalingForm extends RLGApplicationV2 {
+  static DEFAULT_OPTIONS = {
+    id: "rlg-cr-item-scaling",
+    classes: ["cr-item-scaling-window"],
+    window: { frame: true, positioned: true, minimizable: true, resizable: true },
+    position: { width: 820, height: "auto" }
+  };
+
+  static template = "modules/random-loot-generator/crItemScaling.html";
+
+  constructor(options = {}) {
+    super(foundry.utils.mergeObject({
+      window: { title: rlgLocalize("RLG.CRItemScaling.Title") }
+    }, options, { inplace: false }));
+    this.expandedCreatures = new Set();
+  }
+
+  async _prepareContext(options) {
+    const settings = rlgNormalizeCrLootSettings(game.settings.get(RLG_MODULE_ID, "crLootSettings") || {});
+    const fallback = {
+      ...settings.fallback,
+      quantityFormula: settings.fallback.quantityFormula || game.settings.get(RLG_MODULE_ID, "randomQuantityFormula") || "1d4",
+      maxRarity: game.settings.get(RLG_MODULE_ID, "maxRarity") || "Legendary"
+    };
+
+    return {
+      enabled: game.settings.get(RLG_MODULE_ID, "enableCRBasedItems"),
+      fallback,
+      rarityLevels: RLG_RARITY_LEVELS,
+      bands: RLG_DEFAULT_CR_BANDS.map(band => settings.bands[band.id]),
+      creatureTypes: RLG_CREATURE_TYPES.map(type => ({
+        ...type,
+        hasOverrides: Object.values(settings.creatureTypes[type.key]?.bands || {}).some(rlgCrBandHasOverride),
+        expanded: this.expandedCreatures.has(type.key) || Object.values(settings.creatureTypes[type.key]?.bands || {}).some(rlgCrBandHasOverride),
+        bands: RLG_DEFAULT_CR_BANDS.map(band => settings.creatureTypes[type.key]?.bands?.[band.id] || rlgEmptyCrBandOverride(band))
+      }))
+    };
+  }
+
+  async _onRender(context, options) {
+    await super._onRender(context, options);
+    const form = this.element.querySelector("form");
+    form?.addEventListener("submit", event => event.preventDefault());
+    form?.addEventListener("change", event => this._onAutoSave(event));
+    this.element.querySelectorAll(".creature-cr-toggle").forEach(button => {
+      button.addEventListener("click", event => this._toggleCreatureSection(event.currentTarget.closest(".creature-cr-block")));
+    });
+    this.element.querySelector(".export-cr-settings")?.addEventListener("click", event => this._exportCrSettings(event));
+    this.element.querySelector(".import-cr-settings")?.addEventListener("click", event => this._importCrSettings(event));
+    this.element.querySelector(".restore-defaults")?.addEventListener("click", event => this._onRestoreDefaults(event));
+  }
+
+  _toggleCreatureSection(block) {
+    if (!block) return;
+    const creature = block.dataset.creature;
+    block.classList.toggle("collapsed");
+    const expanded = !block.classList.contains("collapsed");
+    if (expanded) this.expandedCreatures.add(creature);
+    else this.expandedCreatures.delete(creature);
+    const button = block.querySelector(".creature-cr-toggle");
+    const icon = button?.querySelector("i");
+    button?.setAttribute("aria-expanded", expanded ? "true" : "false");
+    icon?.classList.toggle("fa-chevron-down", expanded);
+    icon?.classList.toggle("fa-chevron-right", !expanded);
+  }
+
+  _readBand(form, selector) {
+    return {
+      quantityFormula: form.querySelector(`${selector}[data-field="quantityFormula"]`)?.value?.trim() || "",
+      itemChance: rlgNormalizeItemChance(form.querySelector(`${selector}[data-field="itemChance"]`)?.value),
+      maxRarity: form.querySelector(`${selector}[data-field="maxRarity"]`)?.value || ""
+    };
+  }
+
+  _validateQuantity(formula) {
+    const quantityRegex = /^(\d+d\d+([+-]\d+)?|\d+)$/;
+    return !formula || quantityRegex.test(formula);
+  }
+
+  async _saveForm(form, { notify = false } = {}) {
+    const fallbackQuantity = form.querySelector('[name="fallback.quantityFormula"]')?.value?.trim() || "1d4";
+    if (!this._validateQuantity(fallbackQuantity)) {
+      ui.notifications.warn(rlgFormat("RLG.Notification.InvalidQuantity", { formula: fallbackQuantity }));
+      return false;
     }
 
-    async _onSave(event) {
-        event.preventDefault();
-        const formData = new FormData(this.element.find("form")[0]);
-        let percentages = {};
-        for (let [key, value] of formData.entries()) {
-            percentages[key] = parseInt(value) || 0;
+    const settings = rlgDefaultCrLootSettings();
+    settings.fallback = {
+      quantityFormula: fallbackQuantity,
+      itemChance: rlgNormalizeItemChance(form.querySelector('[name="fallback.itemChance"]')?.value) ?? 100
+    };
+
+    for (const band of RLG_DEFAULT_CR_BANDS) {
+      const bandSettings = this._readBand(form, `[data-scope="global"][data-band="${band.id}"]`);
+      if (!this._validateQuantity(bandSettings.quantityFormula)) {
+        ui.notifications.warn(rlgFormat("RLG.Notification.InvalidQuantity", { formula: bandSettings.quantityFormula }));
+        return false;
+      }
+      settings.bands[band.id] = rlgNormalizeCrBandSettings(band, bandSettings, { defaults: true });
+    }
+
+    for (const type of RLG_CREATURE_TYPES) {
+      const bands = {};
+      for (const band of RLG_DEFAULT_CR_BANDS) {
+        const bandSettings = this._readBand(form, `[data-scope="creature"][data-creature="${type.key}"][data-band="${band.id}"]`);
+        if (!this._validateQuantity(bandSettings.quantityFormula)) {
+          ui.notifications.warn(rlgFormat("RLG.Notification.InvalidQuantity", { formula: bandSettings.quantityFormula }));
+          return false;
         }
-        await game.settings.set("random-loot-generator", "rarityPercentages", percentages);
-        ui.notifications.info(game.i18n.localize("RLG.RarityPercentages.Saved"));
-        this.close();
+        bands[band.id] = rlgNormalizeCrBandSettings(band, bandSettings, { defaults: false });
+      }
+      settings.creatureTypes[type.key] = { bands };
     }
 
-    async _onRestoreDefaults(event) {
+    await game.settings.set(RLG_MODULE_ID, "enableCRBasedItems", form.querySelector('[name="enabled"]')?.checked || false);
+    await game.settings.set(RLG_MODULE_ID, "randomQuantityFormula", settings.fallback.quantityFormula);
+    await game.settings.set(RLG_MODULE_ID, "maxRarity", form.querySelector('[name="fallback.maxRarity"]')?.value || "Legendary");
+    await game.settings.set(RLG_MODULE_ID, "crLootSettings", settings);
+    if (notify) ui.notifications.info(rlgLocalize("RLG.CRItemScaling.Saved"));
+    return true;
+  }
+
+  async _onAutoSave(event) {
+    const form = event.currentTarget;
+    const saved = await this._saveForm(form);
+    if (saved && event.target?.dataset?.scope === "creature") this._updateCreatureOverrideIndicator(event.target.dataset.creature);
+    if (saved && event.target?.name === "enabled") this._updateEnabledStatus(event.target.checked);
+    if (saved) rlgDebug("CR item scaling auto-saved");
+  }
+
+  _updateCreatureOverrideIndicator(creature) {
+    if (!creature) return;
+    const block = this.element.querySelector(`.creature-cr-block[data-creature="${creature}"]`);
+    const label = block?.querySelector(".creature-cr-label");
+    if (!block || !label) return;
+    const hasOverrides = Array.from(block.querySelectorAll("[data-scope='creature']"))
+      .some(input => rlgHasTuningValue(input.value));
+    label.classList.toggle("custom", hasOverrides);
+  }
+
+  _updateEnabledStatus(enabled) {
+    const status = this.element.querySelector(".cr-scaling-status");
+    if (!status) return;
+    status.classList.toggle("enabled", enabled);
+    status.classList.toggle("disabled", !enabled);
+    status.textContent = enabled
+      ? "CR-Based Item Scaling is enabled. CR bands can override quantity, item chance, and max rarity."
+      : "CR-Based Item Scaling is disabled. Saved CR band settings will not affect loot until enabled.";
+  }
+
+  _exportCrSettings(event) {
+    event.preventDefault();
+    const payload = {
+      module: RLG_MODULE_ID,
+      type: "cr-item-scaling",
+      version: game.modules.get(RLG_MODULE_ID)?.version || "",
+      exportedAt: new Date().toISOString(),
+      enableCRBasedItems: game.settings.get(RLG_MODULE_ID, "enableCRBasedItems"),
+      randomQuantityFormula: game.settings.get(RLG_MODULE_ID, "randomQuantityFormula"),
+      maxRarity: game.settings.get(RLG_MODULE_ID, "maxRarity"),
+      crLootSettings: game.settings.get(RLG_MODULE_ID, "crLootSettings")
+    };
+    const json = JSON.stringify(payload, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "random-loot-generator-cr-settings.json";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  _importCrSettings(event) {
+    event.preventDefault();
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json,application/json";
+    input.addEventListener("change", async changeEvent => {
+      const file = changeEvent.currentTarget.files?.[0];
+      if (!file) return;
+      try {
+        const payload = JSON.parse(await file.text());
+        const crLootSettings = payload.crLootSettings || payload.settings?.crLootSettings;
+        if (!crLootSettings || typeof crLootSettings !== "object") throw new Error("Missing crLootSettings");
+        await game.settings.set(RLG_MODULE_ID, "enableCRBasedItems", payload.enableCRBasedItems ?? payload.settings?.enableCRBasedItems ?? false);
+        if (payload.randomQuantityFormula || payload.settings?.randomQuantityFormula) {
+          await game.settings.set(RLG_MODULE_ID, "randomQuantityFormula", payload.randomQuantityFormula || payload.settings.randomQuantityFormula);
+        }
+        if (payload.maxRarity || payload.settings?.maxRarity) {
+          await game.settings.set(RLG_MODULE_ID, "maxRarity", payload.maxRarity || payload.settings.maxRarity);
+        }
+        await game.settings.set(RLG_MODULE_ID, "crLootSettings", rlgNormalizeCrLootSettings(crLootSettings));
+        ui.notifications.info(rlgLocalize("RLG.CRItemScaling.Imported"));
+        this.render({ force: true });
+      } catch (error) {
+        ui.notifications.error(rlgLocalize("RLG.CRItemScaling.ImportFailed"));
+        console.error("CR item scaling import failed:", error);
+      }
+    });
+    input.click();
+  }
+
+  async _onRestoreDefaults(event) {
+    event.preventDefault();
+    const confirmed = await RLG_DialogV2.confirm({
+      window: { title: rlgLocalize("RLG.CRItemScaling.RestoreConfirm.Title") },
+      content: `<p>${rlgLocalize("RLG.CRItemScaling.RestoreConfirm.Content")}</p>`,
+      yes: { label: rlgLocalize("RLG.CRItemScaling.RestoreConfirm.Restore"), icon: "fa-solid fa-repeat" },
+      no: { label: rlgLocalize("RLG.ManageLootSources.Cancel"), icon: "fa-solid fa-ban" },
+      rejectClose: false
+    });
+    if (!confirmed) return;
+    await game.settings.set(RLG_MODULE_ID, "enableCRBasedItems", false);
+    await game.settings.set(RLG_MODULE_ID, "randomQuantityFormula", "1d4");
+    await game.settings.set(RLG_MODULE_ID, "crLootSettings", rlgDefaultCrLootSettings());
+    ui.notifications.info(rlgLocalize("RLG.CRItemScaling.Restored"));
+    this.render({ force: true });
+  }
+}
+
+class CreatureTypeLootForm extends RLGApplicationV2 {
+  static DEFAULT_OPTIONS = {
+    id: "rlg-creature-type-loot",
+    classes: ["creature-type-loot-window"],
+    window: { frame: true, positioned: true, minimizable: true, resizable: true },
+    position: { width: 700, height: "auto" }
+  };
+
+  static template = "modules/random-loot-generator/creatureTypeLoot.html";
+
+  constructor(options = {}) {
+    super(foundry.utils.mergeObject({
+      window: { title: rlgLocalize("RLG.CreatureTypeLoot.Title") }
+    }, options, { inplace: false }));
+  }
+
+  async _prepareContext(options) {
+    const settings = foundry.utils.duplicate(game.settings.get(RLG_MODULE_ID, "creatureTypeLoot") || {});
+    const creatureTypes = RLG_CREATURE_TYPES.map(type => {
+      const typeSettings = rlgNormalizeLootSettings(settings[type.key]);
+      const totalSources = typeSettings.compendiums.length + typeSettings.folders.length + typeSettings.tables.length;
+      return {
+        ...type,
+        selectedLabel: totalSources > 0 ? `Custom [${totalSources}]` : rlgLocalize("RLG.CompendiumSelection.DefaultLabel"),
+        quantityFormula: typeSettings.quantityFormula || "",
+        maxRarity: typeSettings.maxRarity || "",
+        currencyChance: typeSettings.currencyChance !== null ? typeSettings.currencyChance : "",
+        itemChance: typeSettings.itemChance !== null ? typeSettings.itemChance : "",
+        totalSources
+      };
+    });
+
+    console.log("Rendering creature types:", creatureTypes);
+    return {
+      creatureTypes,
+      globalMaxRarity: game.settings.get(RLG_MODULE_ID, "maxRarity") || "Legendary",
+      globalCurrencyChance: game.settings.get(RLG_MODULE_ID, "defaultCurrencyChance") || 75,
+      globalItemChance: 100,
+      globalQuantityFormula: game.settings.get(RLG_MODULE_ID, "randomQuantityFormula") || "1d4"
+    };
+  }
+
+  async _onRender(context, options) {
+    await super._onRender(context, options);
+    const html = this.element;
+    const focusNextField = currentInput => {
+      const inputs = Array.from(html.querySelectorAll("input, select, button"));
+      const currentIndex = inputs.indexOf(currentInput);
+      const nextIndex = (currentIndex + 1) % inputs.length;
+      inputs[nextIndex]?.focus();
+    };
+    const debouncedRender = foundry.utils.debounce(() => this.render({ force: true }), 100);
+    const onFieldKeydown = event => {
+      if (event.key === "Tab") {
         event.preventDefault();
-        const defaultPercentages = {
-            "Common": 50,
-            "Uncommon": 30,
-            "Rare": 15,
-            "Very Rare": 4,
-            "Legendary": 1
+        focusNextField(event.currentTarget);
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+      }
+    };
+
+    html.querySelectorAll(".quantity-input").forEach(input => {
+      input.addEventListener("keydown", onFieldKeydown);
+      input.addEventListener("change", async event => {
+        const creatureType = event.currentTarget.dataset.creatureType;
+        const newFormula = event.currentTarget.value.trim();
+        const quantityRegex = /^(\d+d\d+([+-]\d+)?|\d+)$/;
+        if (newFormula && !quantityRegex.test(newFormula)) {
+          ui.notifications.warn(rlgFormat("RLG.Notification.InvalidQuantity", { formula: newFormula }));
+          return;
+        }
+        await this._updateCreatureSetting(creatureType, { quantityFormula: newFormula });
+        console.log(`Updated ${creatureType} quantityFormula to: ${newFormula}`);
+        debouncedRender();
+      });
+    });
+
+    html.querySelectorAll(".item-chance-input").forEach(input => {
+      input.addEventListener("keydown", onFieldKeydown);
+      input.addEventListener("change", async event => {
+        const creatureType = event.currentTarget.dataset.creatureType;
+        const value = event.currentTarget.value.trim();
+        const itemChance = value === "" || parseInt(value) === 0 ? null : parseInt(value);
+        await this._updateCreatureSetting(creatureType, { itemChance });
+        console.log(`Updated ${creatureType} itemChance to: ${itemChance === null ? "[Global]" : itemChance + "%"}`);
+        debouncedRender();
+      });
+    });
+
+	    html.querySelectorAll(".currency-chance-input").forEach(input => {
+	      input.addEventListener("keydown", onFieldKeydown);
+	      input.addEventListener("change", async event => {
+	        const creatureType = event.currentTarget.dataset.creatureType;
+	        const value = event.currentTarget.value.trim();
+	        const currencyChance = value === "" ? null : parseInt(value);
+	        await this._updateCreatureSetting(creatureType, { currencyChance });
+	        console.log(`Updated ${creatureType} currencyChance to: ${currencyChance === null ? "[Global]" : currencyChance + "%"}`);
+	        debouncedRender();
+      });
+    });
+
+    html.querySelectorAll(".rarity-select").forEach(select => {
+      select.addEventListener("keydown", onFieldKeydown);
+      select.addEventListener("change", async event => {
+        const creatureType = event.currentTarget.dataset.creatureType;
+        const maxRarity = event.currentTarget.value;
+        await this._updateCreatureSetting(creatureType, { maxRarity });
+        console.log(`Updated ${creatureType} maxRarity to: ${maxRarity || "[Global]"}`);
+        debouncedRender();
+      });
+    });
+
+    html.querySelectorAll(".compendium-select-btn").forEach(button => {
+      button.addEventListener("click", event => this._openCreatureSourceDialog(event.currentTarget.dataset.creatureType));
+    });
+    html.querySelector(".reset-defaults")?.addEventListener("click", () => this._resetDefaults());
+    html.querySelector(".export-sources")?.addEventListener("click", () => this.exportSources());
+    html.querySelector(".import-sources")?.addEventListener("click", () => this.importSources());
+  }
+
+  async _updateCreatureSetting(creatureType, update) {
+    const settings = foundry.utils.duplicate(game.settings.get(RLG_MODULE_ID, "creatureTypeLoot") || {});
+    settings[creatureType] = { ...rlgDefaultLootSettings(), ...(settings[creatureType] || {}), ...update };
+    await game.settings.set(RLG_MODULE_ID, "creatureTypeLoot", settings);
+  }
+
+  async _openCreatureSourceDialog(creatureType) {
+    if (!creatureType) {
+      console.error("No creature type specified for compendium selection button.");
+      ui.notifications.error(rlgLocalize("RLG.Notification.NoCreatureType"));
+      return;
+    }
+    const creatureTypeLoot = game.settings.get(RLG_MODULE_ID, "creatureTypeLoot") || {};
+    const typeSettings = rlgNormalizeLootSettings(creatureTypeLoot[creatureType]);
+	    await rlgOpenSourceSelectionDialog({
+	      title: rlgFormat("RLG.CompendiumSelection.TitleFor", { creatureType }),
+	      selectedCompendiums: typeSettings.compendiums,
+	      selectedFolders: typeSettings.folders,
+	      selectedTables: typeSettings.tables,
+	      requireSelection: false,
+	      onSave: async selected => {
+        const settings = foundry.utils.duplicate(game.settings.get(RLG_MODULE_ID, "creatureTypeLoot") || {});
+        settings[creatureType] = {
+          ...rlgDefaultLootSettings(),
+          ...typeSettings,
+          compendiums: selected.compendiums,
+          folders: selected.folders,
+          tables: selected.tables
         };
-        await game.settings.set("random-loot-generator", "rarityPercentages", defaultPercentages);
-        ui.notifications.info(game.i18n.localize("RLG.RarityPercentages.Restored"));
-        this.render();
+        await game.settings.set(RLG_MODULE_ID, "creatureTypeLoot", settings);
+        console.log(`Updated ${creatureType} sources:`, settings[creatureType]);
+        this.render({ force: true });
+      }
+    });
+  }
+
+  async _resetDefaults() {
+    const confirmed = await RLG_DialogV2.confirm({
+      window: { title: rlgLocalize("RLG.ResetConfirm.Title") },
+      content: `<p>${rlgLocalize("RLG.Notification.ResetConfirm")}</p>`,
+      yes: { label: rlgLocalize("RLG.ResetConfirm.Reset"), icon: "fa-solid fa-repeat" },
+      no: { label: rlgLocalize("RLG.ManageLootSources.Cancel"), icon: "fa-solid fa-ban" },
+      rejectClose: false
+    });
+    if (!confirmed) {
+      console.log("Reset canceled");
+      return;
+    }
+    await game.settings.set(RLG_MODULE_ID, "creatureTypeLoot", {});
+    ui.notifications.info(rlgLocalize("RLG.Notification.ResetSuccess"));
+    this.render({ force: true });
+  }
+
+  exportSources() {
+	    const settings = {
+	      selectedCompendiums: game.settings.get(RLG_MODULE_ID, "selectedCompendiums"),
+	      selectedFolders: game.settings.get(RLG_MODULE_ID, "selectedFolders"),
+	      lootTables: game.settings.get(RLG_MODULE_ID, "lootTables"),
+	      creatureTypeLoot: game.settings.get(RLG_MODULE_ID, "creatureTypeLoot"),
+	      enableCRBasedItems: game.settings.get(RLG_MODULE_ID, "enableCRBasedItems"),
+	      crLootSettings: game.settings.get(RLG_MODULE_ID, "crLootSettings")
+	    };
+    const json = JSON.stringify(settings, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "random-loot-generator-sources.json";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  importSources() {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json";
+    input.onchange = async event => {
+      const file = event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = async e => {
+        try {
+          const settings = JSON.parse(e.target.result);
+          await game.settings.set(RLG_MODULE_ID, "selectedCompendiums", settings.selectedCompendiums || "");
+	          await game.settings.set(RLG_MODULE_ID, "selectedFolders", settings.selectedFolders || []);
+	          await game.settings.set(RLG_MODULE_ID, "lootTables", settings.lootTables || []);
+	          await game.settings.set(RLG_MODULE_ID, "creatureTypeLoot", settings.creatureTypeLoot || {});
+	          await game.settings.set(RLG_MODULE_ID, "enableCRBasedItems", settings.enableCRBasedItems || false);
+	          await game.settings.set(RLG_MODULE_ID, "crLootSettings", settings.crLootSettings || rlgDefaultCrLootSettings());
+	          game.lootGenerator.selectedCompendiums = rlgNormalizeCompendiumSetting(settings.selectedCompendiums);
+          game.lootGenerator.selectedFolders = settings.selectedFolders || [];
+          game.lootGenerator.selectedTables = settings.lootTables || [];
+          ui.notifications.info(rlgLocalize("RLG.Notification.SourcesImported"));
+          this.render({ force: true });
+        } catch (error) {
+          ui.notifications.error(rlgLocalize("RLG.Notification.ImportFailed"));
+          console.error("Import error:", error);
+        }
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+  }
+}
+
+class TokenLootSettingsForm extends RLGApplicationV2 {
+  static DEFAULT_OPTIONS = {
+    id: "rlg-token-loot-settings",
+    classes: ["token-loot-settings-window"],
+    window: { frame: true, positioned: true, minimizable: true, resizable: true },
+    position: { width: 600, height: "auto" }
+  };
+
+  static template = "modules/random-loot-generator/tokenLootSettings.html";
+
+  constructor(actor, creatureType, options = {}) {
+    super(foundry.utils.mergeObject({
+      id: `rlg-token-loot-settings-${actor?.id || foundry.utils.randomID()}`,
+      window: { title: options.title || rlgLocalize("RLG.TokenLootSettings.Title") }
+    }, options, { inplace: false }));
+    this.actor = actor;
+    this.creatureType = creatureType;
+    this.mode = options.mode || "token";
+    this.tokenDocument = options.tokenDocument || null;
+  }
+
+  async _getStoredSettings() {
+    if (this.mode === "prototype") return rlgPrototypeLootSettings(this.actor);
+    if (this.tokenDocument) {
+      return rlgDocumentHasFlag(this.tokenDocument, "tokenLootSettings")
+        ? rlgDocumentFlagSettings(this.tokenDocument, "tokenLootSettings")
+        : rlgDocumentFlagSettings(this.actor, "lootSettings");
+    }
+    return rlgDocumentFlagSettings(this.actor, "lootSettings");
+  }
+
+  async _setStoredSettings(settings) {
+    if (this.mode === "prototype") {
+      await this.actor.update({
+        [`prototypeToken.flags.${RLG_MODULE_ID}.defaultLootSettings`]: settings,
+        [`prototypeToken.flags.${RLG_MODULE_ID}.defaultLootEnabled`]: true
+      });
+      return;
     }
 
-    async _updateObject(event, formData) {
-        // Handled by _onSave
+    if (this.tokenDocument) {
+      await this.tokenDocument.setFlag(RLG_MODULE_ID, "tokenLootSettings", settings);
+      await this.tokenDocument.setFlag(RLG_MODULE_ID, "tokenLootEnabled", true);
+      return;
     }
+
+    await this.actor.setFlag(RLG_MODULE_ID, "lootSettings", settings);
+    await this.actor.setFlag(RLG_MODULE_ID, "customLootEnabled", true);
+  }
+
+  async _prepareContext(options) {
+    const lootSettings = rlgNormalizeLootSettings((await this._getStoredSettings()) || {});
+    const creatureLootSettings = game.settings.get(RLG_MODULE_ID, "creatureTypeLoot") || {};
+    const typeSettings = rlgNormalizeLootSettings(creatureLootSettings[this.creatureType]);
+
+    return {
+      compendiums: lootSettings.compendiums.length ? lootSettings.compendiums : typeSettings.compendiums,
+      folders: lootSettings.folders.length ? lootSettings.folders : typeSettings.folders,
+      tables: lootSettings.tables.length ? lootSettings.tables : typeSettings.tables,
+      quantityFormula: lootSettings.quantityFormula || typeSettings.quantityFormula || "",
+      maxRarity: lootSettings.maxRarity || typeSettings.maxRarity || "",
+      itemChance: lootSettings.itemChance !== null ? lootSettings.itemChance : typeSettings.itemChance !== null ? typeSettings.itemChance : "",
+      currencyChance: lootSettings.currencyChance !== null ? lootSettings.currencyChance : typeSettings.currencyChance !== null ? typeSettings.currencyChance : "",
+      globalQuantityFormula: game.settings.get(RLG_MODULE_ID, "randomQuantityFormula") || "1d4",
+      globalMaxRarity: game.settings.get(RLG_MODULE_ID, "maxRarity") || "Legendary",
+      globalItemChance: 100,
+      globalCurrencyChance: game.settings.get(RLG_MODULE_ID, "defaultCurrencyChance") || 75,
+      totalSources: lootSettings.compendiums.length + lootSettings.folders.length + lootSettings.tables.length
+    };
+  }
+
+  async _onRender(context, options) {
+    await super._onRender(context, options);
+    const html = this.element;
+    const focusNextField = currentInput => {
+      const inputs = Array.from(html.querySelectorAll("input, select, button"));
+      const currentIndex = inputs.indexOf(currentInput);
+      const nextIndex = (currentIndex + 1) % inputs.length;
+      inputs[nextIndex]?.focus();
+    };
+    const onFieldKeydown = event => {
+      if (event.key === "Tab") {
+        event.preventDefault();
+        focusNextField(event.currentTarget);
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+      }
+    };
+
+    html.querySelector(".quantity-input")?.addEventListener("keydown", onFieldKeydown);
+    html.querySelector(".quantity-input")?.addEventListener("change", async event => {
+      const quantityFormula = event.currentTarget.value.trim();
+      const quantityRegex = /^(\d+d\d+([+-]\d+)?|\d+)$/;
+      if (quantityFormula && !quantityRegex.test(quantityFormula)) {
+        ui.notifications.warn(rlgFormat("RLG.Notification.InvalidQuantity", { formula: quantityFormula }));
+        return;
+      }
+      await this._updateTokenSetting({ quantityFormula });
+      console.log(`Updated token quantityFormula to: ${quantityFormula}`);
+      this.render({ force: true });
+    });
+
+    html.querySelector(".item-chance-input")?.addEventListener("keydown", onFieldKeydown);
+    html.querySelector(".item-chance-input")?.addEventListener("change", async event => {
+      const value = event.currentTarget.value.trim();
+      const itemChance = value === "" || parseInt(value) === 0 ? null : parseInt(value);
+      await this._updateTokenSetting({ itemChance });
+      console.log(`Updated token itemChance to: ${itemChance === null ? "[Global]" : itemChance + "%"}`);
+      this.render({ force: true });
+    });
+
+    html.querySelector(".currency-chance-input")?.addEventListener("keydown", onFieldKeydown);
+    html.querySelector(".currency-chance-input")?.addEventListener("change", async event => {
+      const value = event.currentTarget.value.trim();
+      const currencyChance = value === "" ? null : parseInt(value);
+      await this._updateTokenSetting({ currencyChance });
+      console.log(`Updated token currencyChance to: ${currencyChance === null ? "[Global]" : currencyChance + "%"}`);
+      this.render({ force: true });
+    });
+
+    html.querySelector(".rarity-select")?.addEventListener("keydown", onFieldKeydown);
+    html.querySelector(".rarity-select")?.addEventListener("change", async event => {
+      const maxRarity = event.currentTarget.value;
+      await this._updateTokenSetting({ maxRarity });
+      console.log(`Updated token maxRarity to: ${maxRarity || "[Global]"}`);
+      this.render({ force: true });
+    });
+
+    html.querySelector(".compendium-select-btn")?.addEventListener("click", () => this._openTokenSourceDialog());
+  }
+
+  async _updateTokenSetting(update) {
+    const settings = { ...rlgDefaultLootSettings(), ...((await this._getStoredSettings()) || {}), ...update };
+    await this._setStoredSettings(settings);
+  }
+
+  async _openTokenSourceDialog() {
+    const settings = rlgNormalizeLootSettings((await this._getStoredSettings()) || {});
+    await rlgOpenSourceSelectionDialog({
+      title: rlgFormat("RLG.TokenLootSettings.TitleFor", { name: this.actor.name }),
+      selectedCompendiums: settings.compendiums,
+      selectedFolders: settings.folders,
+      selectedTables: settings.tables,
+      onSave: async selected => {
+        const updated = {
+          ...rlgDefaultLootSettings(),
+          ...settings,
+          compendiums: selected.compendiums,
+          folders: selected.folders,
+          tables: selected.tables
+        };
+        await this._setStoredSettings(updated);
+        console.log(`Updated token loot sources for ${this.actor.name}:`, updated);
+        this.render({ force: true });
+      }
+    });
+  }
+}
+
+class RarityPercentagesForm extends RLGApplicationV2 {
+  static DEFAULT_OPTIONS = {
+    id: "rlg-rarity-percentages",
+    classes: ["rarity-percentages-window"],
+    window: { frame: true, positioned: true, minimizable: true, resizable: true },
+    position: { width: 400, height: "auto" }
+  };
+
+  static template = "modules/random-loot-generator/rarityPercentages.html";
+
+  constructor(options = {}) {
+    super(foundry.utils.mergeObject({
+      window: { title: rlgLocalize("RLG.RarityPercentages.Title") }
+    }, options, { inplace: false }));
+  }
+
+  async _prepareContext(options) {
+    return {
+      percentages: game.settings.get(RLG_MODULE_ID, "rarityPercentages") || RLG_DEFAULT_RARITY_PERCENTAGES
+    };
+  }
+
+  async _onRender(context, options) {
+    await super._onRender(context, options);
+    this.element.querySelector(".save-percentages")?.addEventListener("click", event => this._onSave(event));
+    this.element.querySelector(".restore-defaults")?.addEventListener("click", event => this._onRestoreDefaults(event));
+  }
+
+  async _onSave(event) {
+    event.preventDefault();
+    const form = this.element.querySelector("form");
+    const formData = new FormData(form);
+    const percentages = {};
+    for (const [key, value] of formData.entries()) {
+      percentages[key] = parseInt(value) || 0;
+    }
+    await game.settings.set(RLG_MODULE_ID, "rarityPercentages", percentages);
+    ui.notifications.info(rlgLocalize("RLG.RarityPercentages.Saved"));
+    this.close();
+  }
+
+  async _onRestoreDefaults(event) {
+    event.preventDefault();
+    await game.settings.set(RLG_MODULE_ID, "rarityPercentages", RLG_DEFAULT_RARITY_PERCENTAGES);
+    ui.notifications.info(rlgLocalize("RLG.RarityPercentages.Restored"));
+    this.render({ force: true });
+  }
 }
 
 Hooks.on("getSceneControlButtons", (controls) => {
@@ -1723,9 +2220,10 @@ Hooks.on("getSceneControlButtons", (controls) => {
     name: "generate-loot",
     title: "Generate Random Loot",
     icon: "fas fa-coins",
+    order: Object.keys(tokenControls.tools).length,
     visible: game.user.isGM,
     button: true,
-    onClick: () => {
+    onChange: () => {
       console.log("🪙 Coin button clicked!");
 
       const selected = canvas.tokens.controlled;
@@ -1782,7 +2280,7 @@ Hooks.once("init", () => {
         name: game.i18n.localize("RLG.RandomQuantityFormula.Name"),
         hint: game.i18n.localize("RLG.RandomQuantityFormula.Hint"),
         scope: "world",
-        config: true,
+        config: false,
         type: String,
         default: "1d4",
         onChange: value => console.log(`Random Quantity Formula updated: ${value}`)
@@ -1801,7 +2299,7 @@ Hooks.once("init", () => {
         name: game.i18n.localize("RLG.MaxRarity.Name"),
         hint: game.i18n.localize("RLG.MaxRarity.Hint"),
         scope: "world",
-        config: true,
+        config: false,
         type: String,
         choices: {
             "Common": game.i18n.localize("RLG.MaxRarity.Common"),
@@ -1823,10 +2321,61 @@ Hooks.once("init", () => {
         default: "dnd5e.tradegoods",
         onChange: value => {
             if (game.lootGenerator && game.packs) {
-                game.lootGenerator.selectedCompendiums = typeof value === "string" ? value.split(",").map(comp => comp.trim()).filter(comp => comp && game.packs.get(comp)) : ["dnd5e.tradegoods"];
+                game.lootGenerator.selectedCompendiums = rlgNormalizeCompendiumSetting(value);
                 console.log(`Compendium selection updated: ${game.lootGenerator.selectedCompendiums}`);
             }
+	        }
+	    });
+
+    game.settings.register("random-loot-generator", "rarityPercentages", {
+        name: game.i18n.localize("RLG.RarityPercentages.Name"),
+        hint: game.i18n.localize("RLG.RarityPercentages.Hint"),
+        scope: "world",
+        config: false,
+        type: Object,
+        default: {
+            "Common": 50,
+            "Uncommon": 30,
+            "Rare": 15,
+            "Very Rare": 4,
+            "Legendary": 1
         }
+    });
+
+    game.settings.registerMenu("random-loot-generator", "rarityPercentagesMenu", {
+        name: game.i18n.localize("RLG.RarityPercentagesMenu.Name"),
+        label: game.i18n.localize("RLG.RarityPercentagesMenu.Label"),
+        hint: game.i18n.localize("RLG.RarityPercentagesMenu.Hint"),
+        icon: "fas fa-percentage",
+        type: RarityPercentagesForm,
+        restricted: true
+    });
+
+    game.settings.register("random-loot-generator", "enableCRBasedItems", {
+        name: game.i18n.localize("RLG.EnableCRBasedItems.Name"),
+        hint: game.i18n.localize("RLG.EnableCRBasedItems.Hint"),
+        scope: "world",
+        config: false,
+        type: Boolean,
+        default: false
+    });
+
+    game.settings.register("random-loot-generator", "crLootSettings", {
+        name: game.i18n.localize("RLG.CRItemScaling.Name"),
+        hint: game.i18n.localize("RLG.CRItemScaling.Hint"),
+        scope: "world",
+        config: false,
+        type: Object,
+        default: rlgDefaultCrLootSettings()
+    });
+
+    game.settings.registerMenu("random-loot-generator", "crLootSettingsMenu", {
+        name: game.i18n.localize("RLG.CRItemScaling.Name"),
+        label: game.i18n.localize("RLG.CRItemScaling.Label"),
+        hint: game.i18n.localize("RLG.CRItemScaling.Hint"),
+        icon: "fas fa-layer-group",
+        type: CrItemScalingForm,
+        restricted: true
     });
 
     game.settings.register("random-loot-generator", "useCRBasedCurrency", {
@@ -1860,6 +2409,16 @@ Hooks.once("init", () => {
         onChange: value => console.log(`Currency Formula updated: ${value}`)
     });
 
+    game.settings.register("random-loot-generator", "enabledCurrencyTypes", {
+        name: game.i18n.localize("RLG.EnabledCurrencyTypes.Name"),
+        hint: game.i18n.localize("RLG.EnabledCurrencyTypes.Hint"),
+        scope: "world",
+        config: true,
+        type: String,
+        default: RLG_DEFAULT_CURRENCY_TYPES,
+        onChange: value => console.log(`Enabled Currency Types updated: ${rlgGetEnabledCurrencyTypes().join(", ") || "none"} (${value})`)
+    });
+
     game.settings.register("random-loot-generator", "selectedFolders", {
         name: game.i18n.localize("RLG.SelectedFolders.Name"),
         hint: game.i18n.localize("RLG.SelectedFolders.Hint"),
@@ -1887,30 +2446,6 @@ Hooks.once("init", () => {
         restricted: true
     });
 
-    game.settings.register("random-loot-generator", "rarityPercentages", {
-        name: game.i18n.localize("RLG.RarityPercentages.Name"),
-        hint: game.i18n.localize("RLG.RarityPercentages.Hint"),
-        scope: "world",
-        config: false,
-        type: Object,
-        default: {
-            "Common": 50,
-            "Uncommon": 30,
-            "Rare": 15,
-            "Very Rare": 4,
-            "Legendary": 1
-        }
-    });
-
-    game.settings.registerMenu("random-loot-generator", "rarityPercentagesMenu", {
-        name: game.i18n.localize("RLG.RarityPercentagesMenu.Name"),
-        label: game.i18n.localize("RLG.RarityPercentagesMenu.Label"),
-        hint: game.i18n.localize("RLG.RarityPercentagesMenu.Hint"),
-        icon: "fas fa-percentage",
-        type: RarityPercentagesForm,
-        restricted: true
-    });
-
     game.settings.register("random-loot-generator", "lootTables", {
         name: game.i18n.localize("RLG.LootTables.Name"),
         hint: game.i18n.localize("RLG.LootTables.Hint"),
@@ -1930,45 +2465,150 @@ Hooks.once("init", () => {
 });
 
 Hooks.on("renderSettingsConfig", (app, html, data) => {
+    const element = rlgAsElement(html);
+    if (!element) return;
     if (!game.user.isGM) return;
 
     const separators = [
         { before: "random-loot-generator.enableLootPreview", title: game.i18n.localize("RLG.Settings.GeneralOptions") },
-        { before: "random-loot-generator.randomQuantityFormula", title: game.i18n.localize("RLG.Settings.DefaultLootSettings") },
+        { before: "random-loot-generator.selectedCompendiums", title: game.i18n.localize("RLG.Settings.DefaultLootSettings") },
         { before: "random-loot-generator.useCRBasedCurrency", title: game.i18n.localize("RLG.Settings.CurrencySettings") }
     ];
 
-    separators.forEach(sep => {
-        const setting = $(html).find(`[name="${sep.before}"]`).closest(".form-group");
-        if (setting.length) {
-            setting.before(`<h2 style="border-bottom: 1px solid #999; margin: 10px 0; padding-bottom: 5px;">${sep.title}</h2>`);
-        }
-    });
+	    separators.forEach(sep => {
+	        const setting = element.querySelector(`[name="${sep.before}"]`)?.closest(".form-group");
+	        if (setting && setting.previousElementSibling?.dataset?.rlgSeparator !== sep.before) {
+	            setting.insertAdjacentHTML("beforebegin", `<h2 data-rlg-separator="${sep.before}" style="border-bottom: 1px solid #999; margin: 10px 0; padding-bottom: 5px;">${sep.title}</h2>`);
+	        }
+	    });
 
-    let settingElement = $(html).find(`[name="random-loot-generator.selectedCompendiums"]`).parent();
-    settingElement.find("input").remove();
-    let button = $(`<button type="button" style="padding: 8px 12px; font-size: 14px; line-height: 1.5; height: auto; display: inline-block; vertical-align: middle; white-space: nowrap; border: 1px solid #999; border-radius: 2px; cursor: pointer;"><i class="fas fa-book"></i> ${game.i18n.localize("RLG.ManageLootSources.Title")}</button>`);
-    button.on("click", () => {
-  const lg = game?.lootGenerator;
-  if (!lg || typeof lg.showCompendiumSelection !== "function") {
-    console.warn("[RLG] Missing showCompendiumSelection handler; loot generator not initialized or world state is corrupted. Try reloading the world, enabling the module, or checking init errors.");
-    return;
-  }
-  lg.showCompendiumSelection();
-});
-    settingElement.append(button);
+    const moveDefaultLootMenus = () => {
+        const findSettingsRow = (...labels) => Array.from(element.querySelectorAll(".form-group"))
+            .find(row => labels.some(label => label && row.textContent?.includes(label)));
+        const findMenuRow = (key, ...labels) => {
+            const keySelector = [
+                `[name="random-loot-generator.${key}"]`,
+                `[data-key="random-loot-generator.${key}"]`,
+                `[data-setting-id="random-loot-generator.${key}"]`,
+                `[data-setting-key="random-loot-generator.${key}"]`
+            ].join(",");
+            return element.querySelector(keySelector)?.closest(".form-group") || findSettingsRow(...labels);
+        };
+        const currencySeparator = element.querySelector(`[data-rlg-separator="random-loot-generator.useCRBasedCurrency"]`);
+        if (!currencySeparator) return;
+        const sourceRow = element.querySelector(`[name="random-loot-generator.selectedCompendiums"]`)?.closest(".form-group");
+        const creatureTypeRow = findMenuRow("creatureTypeLootMenu", game.i18n.localize("RLG.CreatureTypeLootMenu.Name"));
+        const rarityRow = findMenuRow("rarityPercentagesMenu", game.i18n.localize("RLG.RarityPercentagesMenu.Name"));
+        const crScalingRow = findMenuRow("crLootSettingsMenu", game.i18n.localize("RLG.CRItemScaling.Name"), game.i18n.localize("RLG.CRItemScaling.Hint"));
+        if (sourceRow && creatureTypeRow) sourceRow.after(creatureTypeRow);
+        [crScalingRow, rarityRow].filter(Boolean).forEach(row => currencySeparator.before(row));
+    };
+    moveDefaultLootMenus();
+    setTimeout(moveDefaultLootMenus, 0);
 
-    const crBasedCheckbox = $(html).find(`[name="random-loot-generator.useCRBasedCurrency"]`);
-    const currencyFormulaInput = $(html).find(`[name="random-loot-generator.currencyFormula"]`);
+    const insertAllSettingsTools = () => {
+        if (element.querySelector(".rlg-all-settings-tools")) return;
+        const firstSection = element.querySelector(`[data-rlg-separator="random-loot-generator.enableLootPreview"]`);
+        const firstModuleRow = element.querySelector(`[name="random-loot-generator.enableLootPreview"]`)?.closest(".form-group");
+        const anchor = firstSection || firstModuleRow;
+        if (!anchor) return;
+
+        const row = document.createElement("div");
+        row.className = "form-group rlg-all-settings-tools";
+        row.innerHTML = `
+            <label>${game.i18n.localize("RLG.Settings.ImportExport.Name")}</label>
+            <div class="form-fields">
+                <button type="button" class="rlg-export-all-settings" style="padding: 4px 8px; border: 1px solid #999; border-radius: 5px; cursor: pointer;">
+                    <i class="fas fa-download"></i> ${game.i18n.localize("RLG.Settings.ImportExport.Export")}
+                </button>
+                <button type="button" class="rlg-import-all-settings" style="padding: 4px 8px; border: 1px solid #999; border-radius: 5px; cursor: pointer;">
+                    <i class="fas fa-upload"></i> ${game.i18n.localize("RLG.Settings.ImportExport.Import")}
+                </button>
+            </div>
+        `;
+        anchor.before(row);
+        row.querySelector(".rlg-export-all-settings")?.addEventListener("click", rlgExportAllSettings);
+        row.querySelector(".rlg-import-all-settings")?.addEventListener("click", () => {
+            const input = document.createElement("input");
+            input.type = "file";
+            input.accept = ".json,application/json";
+            input.addEventListener("change", event => rlgImportAllSettingsFromFile(event.currentTarget.files?.[0]));
+            input.click();
+        });
+    };
+    insertAllSettingsTools();
+    setTimeout(insertAllSettingsTools, 0);
+
+	    const compendiumInput = element.querySelector(`[name="random-loot-generator.selectedCompendiums"]`);
+    const settingElement = compendiumInput?.parentElement;
+    if (settingElement && !settingElement.querySelector(".rlg-manage-sources")) {
+        compendiumInput?.remove();
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "rlg-manage-sources";
+        button.style.cssText = "padding: 8px 12px; font-size: 14px; line-height: 1.5; height: auto; display: inline-block; vertical-align: middle; white-space: nowrap; border: 1px solid #999; border-radius: 2px; cursor: pointer;";
+        button.innerHTML = `<i class="fas fa-book"></i> ${game.i18n.localize("RLG.ManageLootSources.Title")}`;
+        button.addEventListener("click", () => {
+            const lg = game?.lootGenerator;
+            if (!lg || typeof lg.showCompendiumSelection !== "function") {
+                console.warn("[RLG] Missing showCompendiumSelection handler; loot generator not initialized or world state is corrupted. Try reloading the world, enabling the module, or checking init errors.");
+                return;
+            }
+            lg.showCompendiumSelection();
+        });
+        settingElement.append(button);
+    }
+
+    const currencyTypesInput = element.querySelector(`[name="random-loot-generator.enabledCurrencyTypes"]`);
+    const currencyTypesElement = currencyTypesInput?.parentElement;
+    if (currencyTypesInput && currencyTypesElement && !currencyTypesElement.querySelector(".rlg-currency-types")) {
+        const enabledTypes = rlgGetEnabledCurrencyTypes();
+        const hiddenInput = currencyTypesInput;
+        hiddenInput.type = "hidden";
+
+        const wrapper = document.createElement("div");
+        wrapper.className = "rlg-currency-types";
+        wrapper.style.cssText = "display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-top: 4px;";
+
+        RLG_CURRENCY_TYPES.forEach(type => {
+            const label = document.createElement("label");
+            label.style.cssText = "display: inline-flex; align-items: center; gap: 4px; margin: 0;";
+
+            const checkbox = document.createElement("input");
+            checkbox.type = "checkbox";
+            checkbox.value = type;
+            checkbox.checked = enabledTypes.includes(type);
+
+            const text = document.createElement("span");
+            text.textContent = type.toUpperCase();
+
+            label.append(checkbox, text);
+            wrapper.append(label);
+        });
+
+        const syncHiddenInput = () => {
+            hiddenInput.value = Array.from(wrapper.querySelectorAll("input[type='checkbox']:checked"))
+                .map(checkbox => checkbox.value)
+                .join(",");
+        };
+
+        wrapper.addEventListener("change", syncHiddenInput);
+        syncHiddenInput();
+        currencyTypesElement.append(wrapper);
+    }
+
+    const crBasedCheckbox = element.querySelector(`[name="random-loot-generator.useCRBasedCurrency"]`);
+    const currencyFormulaInput = element.querySelector(`[name="random-loot-generator.currencyFormula"]`);
+    if (!crBasedCheckbox || !currencyFormulaInput) return;
 
     const toggleCurrencyFormula = () => {
-        const isCRBased = crBasedCheckbox.prop("checked");
-        currencyFormulaInput.prop("disabled", isCRBased);
-        currencyFormulaInput.css("opacity", isCRBased ? "0.5" : "1");
+        const isCRBased = crBasedCheckbox.checked;
+        currencyFormulaInput.disabled = isCRBased;
+        currencyFormulaInput.style.opacity = isCRBased ? "0.5" : "1";
     };
 
     toggleCurrencyFormula();
-    crBasedCheckbox.on("change", toggleCurrencyFormula);
+    crBasedCheckbox.addEventListener("change", toggleCurrencyFormula);
 });
 
 Hooks.on("createToken", async (tokenDoc) => {
@@ -1983,96 +2623,100 @@ Hooks.on("createToken", async (tokenDoc) => {
     }
 });
 
-Hooks.on("renderTokenConfig", (app, html, data) => {
-    const $html = $(html);
-    if (!game.user.isGM) return;
+function rlgInjectLootConfigSection({ app, html, mode }) {
+  const element = rlgAsElement(html);
+  if (!element || !game.user.isGM) return;
+  if (element.querySelector('[data-random-loot-generator]')) return;
 
-    const actor = app.document?.actor;
-    if (!actor) {
-        console.warn("No actor found for TokenConfig—skipping custom loot section.");
-        return;
-    }
+  const isPrototype = mode === "prototype";
+  const actor = isPrototype ? (app.document?.parent || app.actor || app.object?.parent) : app.document?.actor;
+  const tokenDocument = isPrototype ? null : app.document;
+  if (!actor) {
+    console.warn("No actor found for RLG token configuration section.");
+    return;
+  }
 
-    const customLootEnabled = actor.getFlag("random-loot-generator", "customLootEnabled") ?? false;
-    console.log(`🔧 TokenConfig render for ${actor.name}: customLootEnabled = ${customLootEnabled}`);
+  const enabled = isPrototype ? rlgPrototypeLootEnabled(actor) : rlgTokenOverrideEnabled({ document: tokenDocument, actor });
+  const checkboxName = isPrototype
+    ? `prototypeToken.flags.${RLG_MODULE_ID}.defaultLootEnabled`
+    : `flags.${RLG_MODULE_ID}.tokenLootEnabled`;
+  const label = isPrototype ? rlgLocalize("RLG.TokenConfig.EnableDefaultLoot") : rlgLocalize("RLG.TokenConfig.EnableTokenLoot");
+  const title = isPrototype ? rlgLocalize("RLG.PrototypeLootSettings.Title") : rlgLocalize("RLG.TokenLootSettings.Title");
 
-    if ($html.find('[data-random-loot-generator]').length > 0) {
-        console.log("🔁 Loot section already present in this render, skipping reinjection.");
-        return;
-    }
+  const template = document.createElement("template");
+  template.innerHTML = `
+    <fieldset data-random-loot-generator style="margin: 10px 0; padding: 10px; border: 1px solid #999; border-radius: 5px; position: relative; z-index: 1;">
+      <legend>${rlgLocalize("RLG.TokenConfig.Legend")}</legend>
+      <div class="form-group">
+        <label>${label}</label>
+        <input type="checkbox" name="${checkboxName}" ${enabled ? "checked" : ""}>
+        <button type="button" class="configure-loot" style="margin-left: 10px; padding: 4px 8px; border: 1px solid #999; border-radius: 5px; background-color: #333; color: white; opacity: ${enabled ? "1" : "0.5"}; cursor: ${enabled ? "pointer" : "not-allowed"};" ${enabled ? "" : "disabled"}>${rlgLocalize("RLG.TokenConfig.ConfigureLoot")}</button>
+      </div>
+    </fieldset>
+  `.trim();
+  const lootSection = template.content.firstElementChild;
 
-    const lootSection = $(`
-        <fieldset data-random-loot-generator style="margin: 10px 0; padding: 10px; border: 1px solid #999; border-radius: 5px; position: relative; z-index: 1;">
-            <legend>${game.i18n.localize("RLG.TokenConfig.Legend")}</legend>
-            <div class="form-group">
-                <label>${game.i18n.localize("RLG.TokenConfig.EnableCustomLoot")}</label>
-                <input type="checkbox" name="flags.random-loot-generator.customLootEnabled" ${customLootEnabled ? "checked" : ""}>
-                <button type="button" class="configure-loot" style="margin-left: 10px; padding: 4px 8px; border: 1px solid #999; border-radius: 5px; background-color: #333; color: white; opacity: ${customLootEnabled ? "1" : "0.5"}; cursor: ${customLootEnabled ? "pointer" : "not-allowed"};" ${customLootEnabled ? "" : "disabled"}>${game.i18n.localize("RLG.TokenConfig.ConfigureLoot")}</button>
-            </div>
-        </fieldset>
-    `);
+  const resourcesTab = element.querySelector('.tab[data-tab="resources"]');
+  const target = resourcesTab || element.querySelector('.sheet-body') || element.querySelector('.form-content');
+  if (!target) {
+    console.warn("No suitable place found to inject RLG loot section.");
+    return;
+  }
+  target.append(lootSection);
 
-    const resourcesTab = $html.find('.tab[data-tab="resources"]');
-    if (resourcesTab.length) {
-        resourcesTab.append(lootSection);
-        console.log("✅ Custom loot section appended to resources tab.");
+  const checkbox = lootSection.querySelector(`input[name="${checkboxName}"]`);
+  const button = lootSection.querySelector(".configure-loot");
+  const toggleButton = () => {
+    const isChecked = checkbox.checked;
+    button.disabled = !isChecked;
+    button.style.cursor = isChecked ? "pointer" : "not-allowed";
+    button.style.opacity = isChecked ? "1" : "0.5";
+  };
+
+  checkbox.addEventListener("change", async event => {
+    const isChecked = event.currentTarget.checked;
+    if (isPrototype) {
+      await actor.update({ [`prototypeToken.flags.${RLG_MODULE_ID}.defaultLootEnabled`]: isChecked });
     } else {
-        const fallback = $html.find('.sheet-body') || $html.find('.form-content');
-        if (fallback.length) {
-            fallback.append(lootSection);
-            console.log("⚠️ Appended custom loot section to fallback area.");
-        } else {
-            console.warn("❌ No suitable place found to inject loot section.");
-        }
+      await tokenDocument.setFlag(RLG_MODULE_ID, "tokenLootEnabled", isChecked);
     }
+    toggleButton();
+  });
 
-    const toggleButton = () => {
-        const isChecked = lootSection.find("input[name='flags.random-loot-generator.customLootEnabled']").prop("checked");
-        lootSection.find(".configure-loot").prop("disabled", !isChecked).css({
-            "cursor": isChecked ? "pointer" : "not-allowed",
-            "opacity": isChecked ? "1" : "0.5"
-        });
-    };
-
-    $html.off("change", "input[name='flags.random-loot-generator.customLootEnabled']").on("change", "input[name='flags.random-loot-generator.customLootEnabled']", async (event) => {
-        const isChecked = $(event.currentTarget).prop("checked");
-        await actor.setFlag("random-loot-generator", "customLootEnabled", isChecked);
-        console.log(`🟨 Checkbox updated for ${actor.name}: customLootEnabled = ${isChecked}`);
-        toggleButton();
+  button.addEventListener("click", async () => {
+    if (button.disabled) return;
+    const creatureType = actor.system?.details?.type?.value || "humanoid";
+    const form = new TokenLootSettingsForm(actor, creatureType, {
+      mode: isPrototype ? "prototype" : "token",
+      tokenDocument,
+      title
     });
-
-    $html.off("click", ".configure-loot").on("click", ".configure-loot", async () => {
-        if (!lootSection.find(".configure-loot").prop("disabled")) {
-            const creatureType = actor.system?.details?.type?.value || "humanoid";
-            const form = new TokenLootSettingsForm(actor, creatureType);
-            form.render(true);
-            form._onClose = async function () {
-                const isCustomEnabled = await actor.getFlag("random-loot-generator", "customLootEnabled") || false;
-                lootSection.find("input[name='flags.random-loot-generator.customLootEnabled']").prop("checked", isCustomEnabled);
-                toggleButton();
-                console.log(`✅ TokenLootSettingsForm closed for ${actor.name}: customLootEnabled = ${isCustomEnabled}`);
-                await FormApplication.prototype._onClose.call(this);
-            };
-        }
+    form.addEventListener("close", async () => {
+      checkbox.checked = isPrototype ? rlgPrototypeLootEnabled(actor) : rlgTokenOverrideEnabled({ document: tokenDocument, actor });
+      toggleButton();
     });
+    form.render({ force: true });
+  });
+}
+
+Hooks.on("renderTokenConfig", (app, html, data) => {
+  rlgInjectLootConfigSection({ app, html, mode: "token" });
 });
 
-Hooks.on('renderDialog', async (app, html, data) => {
+Hooks.on("renderPrototypeTokenConfig", (app, html, data) => {
+  rlgInjectLootConfigSection({ app, html, mode: "prototype" });
+});
+
+Hooks.on('renderDialogV2', async (app, html, data) => {
   if (!game.user.isGM) return;
+  const element = rlgAsElement(html);
+  if (!element?.querySelector(".rlg-source-dialog")) return;
   const title = app.title;
-  const expectedTitles = [
-    game.i18n.localize("RLG.ManageLootSources.Title"),
-    game.i18n.format("RLG.CompendiumSelection.TitleFor", { creatureType: /.*/ }),
-    game.i18n.format("RLG.TokenLootSettings.TitleFor", { name: /.*/ })
-  ];
-  const isTargetDialog = expectedTitles.some(expected => 
-    typeof expected === 'string' ? title === expected : title.match(expected)
-  );
-  if (isTargetDialog) {
+  if (title) {
     rlgDebug(`Decorating dialog: ${title}`);
-    rlgDebug(`Dialog HTML (first 200 chars): ${html[0].outerHTML.substring(0, 200)}...`);
-    await rlgDecorateSourceDialog(app, html);
-    const disabledLabels = html.find('label.rlg-source--disabled');
+    rlgDebug(`Dialog HTML (first 200 chars): ${element.outerHTML.substring(0, 200)}...`);
+    await rlgDecorateSourceDialog(app, element);
+    const disabledLabels = element.querySelectorAll('label.rlg-source--disabled');
     rlgDebug(`Found ${disabledLabels.length} disabled labels in ${title}`);
   } else {
     rlgDebug(`Skipping dialog: ${title} (not a target dialog)`);
